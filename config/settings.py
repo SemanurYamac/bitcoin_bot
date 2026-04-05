@@ -11,8 +11,42 @@ load_dotenv(Path(__file__).parent.parent / '.env')
 
 # ─── Borsa Ayarları ────────────────────────────────────────────────
 EXCHANGE = 'binance'
-SYMBOL = 'BTC/USDT'
+SYMBOL = 'BTC/USDT'  # Varsayılan sembol (tek coin modu için)
 TIMEFRAME = '1h'  # 1 saatlik mum
+
+# ─── Çoklu Coin Desteği ───────────────────────────────────────────
+# Bot bu coinlerin hepsini tarar, sinyal bulduğunda işlem yapar
+SYMBOLS = [
+    'BTC/USDT',    # Bitcoin
+    'ETH/USDT',    # Ethereum
+    'BNB/USDT',    # Binance Coin
+    'SOL/USDT',    # Solana
+    'XRP/USDT',    # Ripple
+    'DOGE/USDT',   # Dogecoin
+    'ADA/USDT',    # Cardano
+    'AVAX/USDT',   # Avalanche
+    'DOT/USDT',    # Polkadot
+    'LINK/USDT',   # Chainlink
+    'MATIC/USDT',  # Polygon
+    'UNI/USDT',    # Uniswap
+    'ATOM/USDT',   # Cosmos
+    'LTC/USDT',    # Litecoin
+    'FIL/USDT',    # Filecoin
+    'APT/USDT',    # Aptos
+    'ARB/USDT',    # Arbitrum
+    'OP/USDT',     # Optimism
+    'NEAR/USDT',   # NEAR Protocol
+    'PEPE/USDT',   # PEPE
+]
+
+# Çoklu coin modunu aktif etmek için True yap
+MULTI_COIN_MODE = True
+
+# Minimum 24s hacim filtresi (USDT cinsinden) - düşük hacimli coinleri atla
+MIN_VOLUME_24H = 10_000_000  # $10M minimum günlük hacim
+
+# Aynı anda max açık pozisyon sayısı
+MAX_OPEN_POSITIONS = 3
 
 # ─── API Anahtarları ───────────────────────────────────────────────
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')

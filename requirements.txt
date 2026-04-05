@@ -1,0 +1,33 @@
+# Exchange connectivity
+ccxt>=4.0.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Technical analysis
+pandas-ta>=0.3.14b
+
+# Database
+# Using built-in sqlite3
+
+# Web dashboard
+streamlit>=1.30.0
+
+# Charts
+plotly>=5.18.0
+
+# Notifications
+python-telegram-bot>=20.0
+
+# Environment management
+python-dotenv>=1.0.0
+
+# Scheduling
+APScheduler>=3.10.0
+
+# HTTP requests
+requests>=2.31.0
+
+# Testing
+pytest>=7.4.0

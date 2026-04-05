@@ -17,7 +17,7 @@ from data.collector import DataCollector
 from data.storage import DataStorage
 from analysis.indicators import TechnicalIndicators
 from strategy.signals import SignalGenerator
-from config.settings import SYMBOL, TIMEFRAME
+from config.settings import SYMBOL, SYMBOLS, MULTI_COIN_MODE, TIMEFRAME
 
 
 # ─── Sayfa Ayarları ──────────────────────────────────────────────
@@ -58,14 +58,14 @@ def get_storage():
     return DataStorage()
 
 
-def create_candlestick_chart(df, signals_df=None):
+def create_candlestick_chart(df, symbol=SYMBOL, signals_df=None):
     """İnteraktif mum grafiği oluşturur."""
     fig = make_subplots(
         rows=3, cols=1,
         shared_xaxes=True,
         vertical_spacing=0.03,
         row_heights=[0.6, 0.2, 0.2],
-        subplot_titles=('BTC/USDT Fiyat', 'RSI', 'MACD')
+        subplot_titles=(f'{symbol} Fiyat', 'RSI', 'MACD')
     )
 
     # ─── Mum Grafiği ──────────────────────────────────────
@@ -73,7 +73,7 @@ def create_candlestick_chart(df, signals_df=None):
         go.Candlestick(
             x=df.index, open=df['open'], high=df['high'],
             low=df['low'], close=df['close'],
-            name='BTC/USDT',
+            name=symbol,
             increasing_line_color='#00e676',
             decreasing_line_color='#ff1744'
         ), row=1, col=1
@@ -177,6 +177,15 @@ def main():
         st.markdown("## 🪙 Bitcoin Bot")
         st.markdown("---")
 
+        # Coin seçimi
+        available_coins = SYMBOLS if MULTI_COIN_MODE else [SYMBOL]
+        selected_symbol = st.selectbox(
+            "🪙 İşlem Çifti (Coin)",
+            available_coins
+        )
+
+        st.markdown("---")
+
         # Veri kaynağı seçimi
         data_source = st.selectbox(
             "📊 Veri Kaynağı",
@@ -212,10 +221,10 @@ def main():
         # Veri çek
         with st.spinner("📥 Veri çekiliyor..."):
             if data_source == "Canlı Veri (Binance)":
-                df = collector.fetch_ohlcv(timeframe=timeframe, limit=candle_count)
+                df = collector.fetch_ohlcv(symbol=selected_symbol, timeframe=timeframe, limit=candle_count)
             else:
                 storage = get_storage()
-                df = storage.load_ohlcv()
+                df = storage.load_ohlcv(symbol=selected_symbol, timeframe=timeframe)
                 if not df.empty:
                     df = df.tail(candle_count)
 
@@ -238,7 +247,7 @@ def main():
         change = ((current_price - prev_price) / prev_price) * 100
 
         with col1:
-            st.metric("💰 BTC Fiyatı", f"${current_price:,.2f}",
+            st.metric(f"💰 {selected_symbol.split('/')[0]} Fiyatı", f"${current_price:,.2f}",
                       f"{change:+.2f}%")
 
         with col2:
@@ -264,7 +273,7 @@ def main():
         st.markdown("---")
 
         # ─── Grafik ──────────────────────────────────────
-        fig = create_candlestick_chart(df)
+        fig = create_candlestick_chart(df, symbol=selected_symbol)
         st.plotly_chart(fig, use_container_width=True)
 
         # ─── Sinyal Detayları ────────────────────────────
@@ -304,13 +313,14 @@ def main():
 
         # ─── Son İşlemler ────────────────────────────────
         st.markdown("---")
-        st.markdown("### 📜 Son İşlemler")
+        st.markdown("### 📜 Son İşlemler (Tüm Coinler)")
 
         storage = get_storage()
+        # Veritabanından tüm trades çekilir (coin'e özel filtreleme yapılmaz, tüm tablo gösterilir)
         trades = storage.get_trades(limit=20)
 
         if not trades.empty:
-            st.dataframe(trades[['timestamp', 'side', 'price', 'amount', 'cost', 'profit_loss', 'mode']],
+            st.dataframe(trades[['timestamp', 'symbol', 'side', 'price', 'amount', 'profit_loss', 'mode']],
                         use_container_width=True, hide_index=True)
         else:
             st.info("Henüz işlem kaydı bulunmuyor. Backtesting veya paper trading çalıştırın.")

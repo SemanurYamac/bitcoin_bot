@@ -124,7 +124,8 @@ class BacktestEngine:
                     balance -= (cost + fee)
                     btc_holding += amount
 
-                    risk_manager.open_position('buy', current_price, amount)
+                    risk_manager.open_position('buy', current_price, amount,
+                                                open_time=current_time)
 
                     trades.append({
                         'timestamp': current_time,

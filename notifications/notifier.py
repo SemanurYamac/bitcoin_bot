@@ -77,9 +77,11 @@ class TelegramNotifier:
             return  # HOLD sinyali bildirmiyoruz
 
         reasons = '\n'.join([f"  • {r}" for r in signal_data.get('reasons', [])[1:]])
+        symbol_name = signal_data.get('symbol', 'BTC/USDT')
 
         message = (
-            f"{emoji} <b>{header}</b>\n\n"
+            f"{emoji} <b>{header}</b>\n"
+            f"🪙 <b>{symbol_name}</b>\n\n"
             f"💰 Fiyat: <code>${signal_data['price']:,.2f}</code>\n"
             f"📊 Skor: <code>{signal_data['score']}</code>\n\n"
             f"📝 <b>Nedenler:</b>\n{reasons}\n\n"
@@ -93,11 +95,15 @@ class TelegramNotifier:
         side = trade_result.get('side', '').upper()
         emoji = '🟢' if side == 'BUY' else '🔴'
 
+        symbol_name = trade_result.get('symbol', 'BTC/USDT')
+        coin = symbol_name.split('/')[0]
+
         message = (
-            f"{emoji} <b>İŞLEM GERÇEKLEŞTİ</b>\n\n"
+            f"{emoji} <b>İŞLEM GERÇEKLEŞTİ</b>\n"
+            f"🪙 <b>{symbol_name}</b>\n\n"
             f"📌 {side}\n"
             f"💰 Fiyat: <code>${trade_result.get('price', 0):,.2f}</code>\n"
-            f"📦 Miktar: <code>{trade_result.get('amount', 0):.6f} BTC</code>\n"
+            f"📦 Miktar: <code>{trade_result.get('amount', 0):.8f} {coin}</code>\n"
             f"💵 Toplam: <code>${trade_result.get('cost', 0):,.2f}</code>\n"
             f"💸 Komisyon: <code>${trade_result.get('fee', 0):,.4f}</code>\n\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -108,12 +114,15 @@ class TelegramNotifier:
     def send_position_closed(self, result):
         """Pozisyon kapanış bildirimi gönderir."""
         emoji = '✅' if result['net_pnl'] > 0 else '❌'
+        symbol_name = result.get('symbol', 'BTC/USDT')
+        coin = symbol_name.split('/')[0]
 
         message = (
-            f"{emoji} <b>POZİSYON KAPATILDI</b>\n\n"
+            f"{emoji} <b>POZİSYON KAPATILDI</b>\n"
+            f"🪙 <b>{symbol_name}</b>\n\n"
             f"📌 Giriş: <code>${result['entry_price']:,.2f}</code>\n"
             f"📌 Çıkış: <code>${result['exit_price']:,.2f}</code>\n"
-            f"📦 Miktar: <code>{result['amount']:.6f} BTC</code>\n\n"
+            f"📦 Miktar: <code>{result['amount']:.8f} {coin}</code>\n\n"
             f"{'💰 Kâr' if result['net_pnl'] > 0 else '💸 Zarar'}: "
             f"<code>${result['net_pnl']:+,.2f} ({result['pnl_percent']:+.2f}%)</code>\n\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"

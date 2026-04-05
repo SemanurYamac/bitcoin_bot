@@ -143,20 +143,36 @@ class SignalGenerator:
 
         # Hacim doğrulayıcı olarak kullanılır (sinyal yönünü güçlendirir)
         if vol_signal in ('high', 'very_high'):
-            vol_multiplier = 1.3 if vol_signal == 'very_high' else 1.1
+            vol_boost = 1.3 if vol_signal == 'very_high' else 1.0
             if score > 0:  # AL yönünde ise hacim güçlendirir
-                vol_score = self.WEIGHTS['volume']
+                vol_score = self.WEIGHTS['volume'] * vol_boost
                 reasons.append(f"Yüksek hacim onayı ({vol_signal})")
             elif score < 0:
-                vol_score = -self.WEIGHTS['volume']
+                vol_score = -self.WEIGHTS['volume'] * vol_boost
                 reasons.append(f"Yüksek hacim onayı ({vol_signal})")
             else:
                 vol_score = 0
+        elif vol_signal in ('low', 'very_low'):
+            # Düşük hacimde sinyaller daha az güvenilir
+            vol_score = 0
+            if abs(score) > 3:
+                reasons.append(f"⚠️ Düşük hacim - sinyal zayıf ({vol_signal})")
         else:
             vol_score = 0
 
         score += vol_score
         details['volume']['score'] = vol_score
+
+        # ─── Trend Filtresi (Güvenlik) ─────────────────────────
+        # Güçlü düşüş trendinde AL sinyali verme
+        if score >= self.BUY_THRESHOLD and ema_signal == 'death_cross':
+            score *= 0.5  # Skoru yarıya düşür
+            reasons.append("⚠️ Death Cross aktif - sinyal zayıflatıldı")
+
+        # Güçlü yükseliş trendinde SAT sinyali verme
+        if score <= self.SELL_THRESHOLD and ema_signal == 'golden_cross':
+            score *= 0.5
+            reasons.append("⚠️ Golden Cross aktif - sinyal zayıflatıldı")
 
         # ─── Son Karar ────────────────────────────────────────
         if score >= self.BUY_THRESHOLD:

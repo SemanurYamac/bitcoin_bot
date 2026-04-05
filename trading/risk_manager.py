@@ -66,11 +66,27 @@ class RiskManager:
         """
         # Bakiyenin belirli yüzdesini kullan
         usdt_amount = current_balance * MAX_POSITION_PERCENT
+
+        # Minimum emir kontrolü (Binance min notional: $5)
+        if usdt_amount < 5.0:
+            logger.warning(f"⚠️ Pozisyon çok küçük: ${usdt_amount:.2f} < $5 minimum")
+            return {'usdt_amount': 0, 'btc_amount': 0}
+
         btc_amount = usdt_amount / current_price
+
+        # Dinamik ondalık hassasiyeti (düşük fiyatlı coinler için)
+        if current_price < 0.001:
+            btc_amount = round(btc_amount, 0)      # PEPE gibi coinler - tam sayı
+        elif current_price < 1:
+            btc_amount = round(btc_amount, 2)      # Küçük coinler
+        elif current_price < 100:
+            btc_amount = round(btc_amount, 4)      # Orta coinler
+        else:
+            btc_amount = round(btc_amount, 8)      # BTC, ETH gibi büyük coinler
 
         return {
             'usdt_amount': round(usdt_amount, 2),
-            'btc_amount': round(btc_amount, 8),
+            'btc_amount': btc_amount,
         }
 
     def calculate_stop_loss(self, entry_price, side='buy'):
@@ -87,18 +103,39 @@ class RiskManager:
         else:
             return round(entry_price * (1 - TAKE_PROFIT_PERCENT), 2)
 
-    def open_position(self, side, entry_price, amount):
-        """Yeni pozisyon açar ve risk parametrelerini ayarlar."""
+    def open_position(self, side, entry_price, amount, atr=None, open_time=None):
+        """Yeni pozisyon açar ve risk parametrelerini ayarlar.
+        
+        Args:
+            atr: Average True Range - volatiliteye göre dinamik stop-loss için
+            open_time: Pozisyon açılış zamanı (backtest için simüle edilen zaman)
+        """
+        # ATR varsa dinamik stop-loss hesapla (volatil coinler için daha geniş)
+        if atr and atr > 0:
+            atr_multiplier = 2.0  # 2x ATR stop-loss mesafesi
+            dynamic_sl_percent = min(atr * atr_multiplier / entry_price, 0.08)  # Max %8
+            dynamic_sl_percent = max(dynamic_sl_percent, 0.02)  # Min %2
+        else:
+            dynamic_sl_percent = STOP_LOSS_PERCENT
+
+        if side == 'buy':
+            stop_loss = round(entry_price * (1 - dynamic_sl_percent), 2)
+            take_profit = self.calculate_take_profit(entry_price, side)
+        else:
+            stop_loss = round(entry_price * (1 + dynamic_sl_percent), 2)
+            take_profit = self.calculate_take_profit(entry_price, side)
+
         self.active_position = {
             'side': side,
             'entry_price': entry_price,
             'amount': amount,
-            'stop_loss': self.calculate_stop_loss(entry_price, side),
-            'take_profit': self.calculate_take_profit(entry_price, side),
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
             'trailing_stop': None,
             'highest_price': entry_price if side == 'buy' else None,
             'lowest_price': entry_price if side == 'sell' else None,
-            'open_time': datetime.now(),
+            'open_time': open_time or datetime.now(),
+            'dynamic_sl_percent': dynamic_sl_percent,
         }
 
         self.daily_trades += 1
@@ -106,7 +143,7 @@ class RiskManager:
         logger.info(
             f"📝 Pozisyon açıldı: {side.upper()} | "
             f"Giriş: ${entry_price:,.2f} | "
-            f"Miktar: {amount:.6f} BTC | "
+            f"Miktar: {amount:.8f} | "
             f"Stop-Loss: ${self.active_position['stop_loss']:,.2f} | "
             f"Take-Profit: ${self.active_position['take_profit']:,.2f}"
         )
@@ -146,9 +183,18 @@ class RiskManager:
                 pos['trailing_stop'] = current_price * (1 - TRAILING_STOP_PERCENT)
 
             if pos.get('trailing_stop') and current_price <= pos['trailing_stop']:
-                # Trailing stop ancak kârdayken aktif olsun
-                if pos['trailing_stop'] > pos['entry_price']:
+                # Trailing stop ancak %3+ kârdayken aktif olsun
+                min_profit_for_trail = pos['entry_price'] * 1.03
+                if pos['trailing_stop'] > min_profit_for_trail:
                     return True, f"Trailing Stop tetiklendi (${pos['trailing_stop']:,.2f})"
+
+        # ─── Max Pozisyon Süresi (48 saat) ─────────────────────
+        if 'open_time' in pos:
+            hold_duration = datetime.now() - pos['open_time']
+            if hold_duration.total_seconds() > 48 * 3600:  # 48 saat
+                current_pnl = (current_price - pos['entry_price']) / pos['entry_price']
+                if current_pnl < -0.01:  # Zarardaysa kapat
+                    return True, f"Max süre aşıldı (48s) ve zararda ({current_pnl:.2%})"
 
         return False, ""
 

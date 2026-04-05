@@ -37,9 +37,11 @@ class TechnicalIndicators:
 
         # MACD - Moving Average Convergence Divergence
         macd_result = ta.macd(df['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
-        df['macd'] = macd_result.iloc[:, 0]         # MACD line
-        df['macd_histogram'] = macd_result.iloc[:, 1]  # Histogram
-        df['macd_signal'] = macd_result.iloc[:, 2]  # Signal line
+        # pandas-ta sütun isimleri: MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9
+        macd_cols = macd_result.columns.tolist()
+        df['macd'] = macd_result[macd_cols[0]]           # MACD line
+        df['macd_histogram'] = macd_result[macd_cols[1]]  # Histogram
+        df['macd_signal'] = macd_result[macd_cols[2]]     # Signal line
 
         # Bollinger Bands
         bbands = ta.bbands(df['close'], length=BOLLINGER_PERIOD, std=BOLLINGER_STD)
@@ -191,6 +193,10 @@ class TechnicalIndicators:
 
         rsi_val = df['rsi'].iloc[index]
         close = df['close'].iloc[index]
+
+        # NaN kontrolü — göstergeler hesaplanamadıysa None dön
+        if pd.isna(rsi_val) or pd.isna(close):
+            return None
 
         return {
             'price': close,

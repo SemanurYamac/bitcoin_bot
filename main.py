@@ -274,15 +274,32 @@ def run_live_bot():
             # ─── Periyodik Bekleme ─────────────────────────────
             # Her 5 dakikada bir açık pozisyonları kontrol et
             for _ in range(12):  # 12 x 5dk = 60dk = 1 saat
-                for sym, rm in risk_managers.items():
+                for sym, rm in list(risk_managers.items()):
                     if rm.active_position:
                         try:
                             ticker = collector.fetch_ticker(sym)
-                            should_exit, reason = rm.check_exit_conditions(ticker['last'])
+                            current_price = ticker['last']
+                            should_exit, exit_reason = rm.check_exit_conditions(current_price)
+
                             if should_exit:
-                                break
-                        except Exception:
-                            pass
+                                pos = rm.active_position
+                                sell_result = executor.execute_sell(
+                                    symbol=sym,
+                                    amount=pos['amount'],
+                                    price=None
+                                )
+
+                                close_result = rm.close_position(
+                                    sell_result.get('price', current_price)
+                                )
+
+                                if close_result:
+                                    close_result['symbol'] = sym
+                                    notifier.send_position_closed(close_result)
+                                    logger.info(f"📌 {sym} periyodik kontrol - pozisyon kapatıldı: {exit_reason}")
+
+                        except Exception as e:
+                            logger.error(f"❌ {sym} periyodik kontrol hatası: {e}")
                 time.sleep(300)
 
         except KeyboardInterrupt:

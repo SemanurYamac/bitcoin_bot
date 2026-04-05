@@ -27,7 +27,7 @@ SYMBOLS = [
     'AVAX/USDT',   # Avalanche
     'DOT/USDT',    # Polkadot
     'LINK/USDT',   # Chainlink
-    'MATIC/USDT',  # Polygon
+    'POL/USDT',    # Polygon (eski MATIC)
     'UNI/USDT',    # Uniswap
     'ATOM/USDT',   # Cosmos
     'LTC/USDT',    # Litecoin

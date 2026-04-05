@@ -24,17 +24,18 @@ class DataStorage:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        # OHLCV verileri tablosu
+        # OHLCV verileri tablosu (çoklu coin uyumlu composite PK)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS ohlcv (
-                timestamp TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
                 open REAL NOT NULL,
                 high REAL NOT NULL,
                 low REAL NOT NULL,
                 close REAL NOT NULL,
                 volume REAL NOT NULL,
                 symbol TEXT DEFAULT 'BTC/USDT',
-                timeframe TEXT DEFAULT '1h'
+                timeframe TEXT DEFAULT '1h',
+                PRIMARY KEY (timestamp, symbol, timeframe)
             )
         ''')
 

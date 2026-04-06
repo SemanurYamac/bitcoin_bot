@@ -1,6 +1,6 @@
 """
-Bitcoin Trading Bot - Genel Ayarlar
-Uzman optimizasyonu: 50 coin, 15dk tarama, $5M hacim filtresi
+Bitcoin Trading Bot - Genel Ayarlar (Faz 1 — Güvenli Temel)
+BTC/ETH/SOL odaklı, risk-based sizing, closed candle sinyal
 """
 import os
 from dotenv import load_dotenv
@@ -15,85 +15,57 @@ EXCHANGE = 'binance'
 SYMBOL = 'BTC/USDT'  # Varsayılan sembol (tek coin modu için)
 TIMEFRAME = '1h'  # 1 saatlik mum
 
-# ─── Çoklu Coin Desteği (50 Coin) ─────────────────────────────────
-# Bot bu coinlerin hepsini tarar, sinyal bulduğunda işlem yapar
+# ─── Varlık Evreni (Aşamalı Genişleme) ────────────────────────────
+# Faz 1: Sadece en likit 3 coin — strateji validasyonu
+# Faz 2+: Config'den yönetilebilir genişleme
 SYMBOLS = [
-    # ─── Tier 1: En Büyük Coinler (Top 10) ─────────────────
-    'BTC/USDT',    # Bitcoin
-    'ETH/USDT',    # Ethereum
-    'BNB/USDT',    # Binance Coin
-    'SOL/USDT',    # Solana
-    'XRP/USDT',    # Ripple
-    'DOGE/USDT',   # Dogecoin
-    'ADA/USDT',    # Cardano
-    'AVAX/USDT',   # Avalanche
-    'TRX/USDT',    # Tron
-    'LINK/USDT',   # Chainlink
-
-    # ─── Tier 2: Büyük Altcoinler (11-20) ──────────────────
-    'DOT/USDT',    # Polkadot
-    'SUI/USDT',    # Sui
-    'SHIB/USDT',   # Shiba Inu
-    'BCH/USDT',    # Bitcoin Cash
-    'LTC/USDT',    # Litecoin
-    'HBAR/USDT',   # Hedera
-    'UNI/USDT',    # Uniswap
-    'NEAR/USDT',   # NEAR Protocol
-    'APT/USDT',    # Aptos
-    'ICP/USDT',    # Internet Computer
-
-    # ─── Tier 3: Orta Büyüklükte Altcoinler (21-30) ───────
-    'ETC/USDT',    # Ethereum Classic
-    'FIL/USDT',    # Filecoin
-    'ATOM/USDT',   # Cosmos
-    'RENDER/USDT', # Render
-    'ARB/USDT',    # Arbitrum
-    'OP/USDT',     # Optimism
-    'FET/USDT',    # Fetch.ai
-    'INJ/USDT',    # Injective
-    'AAVE/USDT',   # Aave
-    'STX/USDT',    # Stacks
-
-    # ─── Tier 4: Yüksek Potansiyelli Altcoinler (31-40) ───
-    'PEPE/USDT',   # PEPE
-    'POL/USDT',    # Polygon (eski MATIC)
-    'SEI/USDT',    # Sei
-    'THETA/USDT',  # Theta
-    'FTM/USDT',    # Fantom
-    'ALGO/USDT',   # Algorand
-    'GALA/USDT',   # Gala
-    'BONK/USDT',   # Bonk
-    'FLOKI/USDT',  # Floki
-    'WIF/USDT',    # dogwifhat
-
-    # ─── Tier 5: DeFi, AI & Gaming Tokenları (41-50) ──────
-    'IMX/USDT',    # Immutable
-    'SAND/USDT',   # The Sandbox
-    'JASMY/USDT',  # JasmyCoin
-    'PENDLE/USDT', # Pendle
-    'ENS/USDT',    # Ethereum Name Service
-    'TIA/USDT',    # Celestia
-    'JUP/USDT',    # Jupiter
-    'ONDO/USDT',   # Ondo Finance
-    'WLD/USDT',    # Worldcoin
-    'TAO/USDT',    # Bittensor
+    'BTC/USDT',    # Bitcoin — ana odak
+    'ETH/USDT',    # Ethereum — en likit altcoin
+    'SOL/USDT',    # Solana — yüksek volatilite + likidite
 ]
 
 # Çoklu coin modunu aktif etmek için True yap
 MULTI_COIN_MODE = True
 
-# Minimum 24s hacim filtresi (USDT cinsinden) - düşük hacimli coinleri atla
-# $5M: yeterli likidite + daha fazla fırsat (eskisi $10M idi)
+# Minimum 24s hacim filtresi (USDT cinsinden)
+# 3 likit coin ile $5M yeterli
 MIN_VOLUME_24H = 5_000_000  # $5M minimum günlük hacim
 
-# Aynı anda max açık pozisyon sayısı (50 coinle 5 daha iyi çeşitlendirme sağlar)
-MAX_OPEN_POSITIONS = 5
+# Aynı anda max açık pozisyon sayısı
+MAX_OPEN_POSITIONS = 3
 
 # ─── Tarama Ayarları ──────────────────────────────────────────────
-# Tarama aralığı (dakika) - 1h mum stratejisi için 15dk optimal
-SCAN_INTERVAL_MINUTES = 15
+# Closed candle modu: True ise sadece kapanmış mum üzerinde sinyal üretir
+# Bu mod repaint riskini sıfırlar
+CLOSED_CANDLE_MODE = True
+
+# Tarama aralığı (dakika)
+# Closed candle modunda: mum kapanışlarını yakalamak için 5dk optimal
+SCAN_INTERVAL_MINUTES = 5
+
 # Pozisyon kontrol aralığı (saniye) - aktif pozisyonlar için
 POSITION_CHECK_INTERVAL = 300  # 5 dakika
+
+# ─── Sinyal Üretim Ayarları ───────────────────────────────────────
+# Rejim filtresi: EMA200 altında BUY threshold'u bu çarpanla artırılır
+# 2.0 = downtrend'de alım sinyali 2x daha zor
+REGIME_FILTER_MULTIPLIER = 2.0
+
+# Cooldown: Exit sonrası bu kadar mum bekle (overtrading engellemesi)
+COOLDOWN_CANDLES = 2
+
+# Sinyal ağırlıkları (her göstergenin katkı puanı)
+SIGNAL_WEIGHTS = {
+    'rsi': 2.0,
+    'macd': 2.5,
+    'bollinger': 1.5,
+    'ema': 2.0,
+    'volume': 1.0,
+}
+
+# Karar eşikleri
+BUY_THRESHOLD = 4.0    # Bu puan üstünde AL sinyali
+SELL_THRESHOLD = -4.0   # Bu puan altında SAT sinyali
 
 # ─── API Anahtarları ───────────────────────────────────────────────
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
@@ -110,8 +82,8 @@ INITIAL_CAPITAL_TRY = 7000  # ~7000 TL
 
 # ─── Teknik Analiz Parametreleri ────────────────────────────────────
 RSI_PERIOD = 14
-RSI_OVERSOLD = 30     # Endüstri standardı (eskisi 35)
-RSI_OVERBOUGHT = 70   # Endüstri standardı (eskisi 65)
+RSI_OVERSOLD = 30     # Endüstri standardı
+RSI_OVERBOUGHT = 70   # Endüstri standardı
 
 MACD_FAST = 12
 MACD_SLOW = 26
@@ -125,13 +97,29 @@ EMA_LONG = 200
 
 VOLUME_MA_PERIOD = 20  # Hacim ortalaması periyodu
 
-# ─── Risk Yönetimi ─────────────────────────────────────────────────
-MAX_POSITION_PERCENT = 0.20  # Bakiyenin max %20'si bir pozisyonda (eskisi %15)
+# ─── Risk Yönetimi (Risk-Based Position Sizing) ───────────────────
+# Risk-per-trade: Her işlemde bakiyenin max ne kadarını riske at
+RISK_PER_TRADE = 0.01  # %1 — endüstri standardı, güvenli başlangıç
+
+# Maksimum pozisyon boyutu (bakiyenin yüzdesi olarak)
+MAX_POSITION_PERCENT = 0.15  # %15 — tek pozisyon max bakiyenin %15'i
+
+# Maksimum portföy maruziyeti (tüm açık pozisyonlar toplamı)
+MAX_PORTFOLIO_EXPOSURE = 0.40  # %40 — bakiyenin max %40'ı kullanılır
+
+# Stop-loss ve take-profit (ATR-based mode için fallback)
 STOP_LOSS_PERCENT = 0.04     # %4 zarar durdurma
 TAKE_PROFIT_PERCENT = 0.08   # %8 kâr alma
 MAX_DRAWDOWN_PERCENT = 0.15  # %15 max portföy düşüşü
-TRAILING_STOP_PERCENT = 0.025 # %2.5 takip eden stop (eskisi %2, kripto için biraz daha geniş)
-MAX_DAILY_TRADES = 10        # Günlük max işlem sayısı (eskisi 5, 50 coinle artırıldı)
+TRAILING_STOP_PERCENT = 0.025 # %2.5 takip eden stop
+TRAILING_ACTIVATION = 0.03   # %3 kârdan sonra trailing aktif olsun
+MAX_DAILY_TRADES = 6         # Günlük max işlem sayısı
+
+# ─── Fail-Safe Ayarları ───────────────────────────────────────────
+# Ardışık hata sayısı bu eşiği geçerse bot koruma moduna geçer
+MAX_CONSECUTIVE_ERRORS = 5
+# Fail-safe modunda bekleme süresi (saniye)
+FAILSAFE_WAIT_SECONDS = 300  # 5 dakika
 
 # ─── Backtesting Ayarları ──────────────────────────────────────────
 BACKTEST_START_DATE = '2022-04-01'

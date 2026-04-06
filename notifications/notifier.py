@@ -1,13 +1,13 @@
 """
-Bitcoin Trading Bot - Telegram Bildirim Modülü
-Alım/satım sinyallerini ve durum raporlarını Telegram üzerinden gönderir.
+Bitcoin Trading Bot - Telegram Bildirim Modülü (Faz 1)
+Score breakdown, rejim bilgisi, profesyonel mesaj formatları.
 """
 import logging
 import asyncio
 from datetime import datetime
 from telegram import Bot
 from telegram.error import TelegramError
-from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SCAN_INTERVAL_MINUTES
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,6 @@ class TelegramNotifier:
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # Eğer bir event loop zaten çalışıyorsa
                 asyncio.ensure_future(self._send_message_async(text, parse_mode))
             else:
                 loop.run_until_complete(self._send_message_async(text, parse_mode))
@@ -60,13 +59,10 @@ class TelegramNotifier:
 
     def send_signal(self, signal_data):
         """
-        Trading sinyali gönderir.
-
-        Args:
-            signal_data: dict with signal, score, price, reasons
+        Trading sinyali gönderir — score breakdown dahil.
         """
         signal = signal_data['signal']
-        
+
         if signal == 'BUY':
             emoji = '🟢'
             header = '📈 AL SİNYALİ'
@@ -74,10 +70,20 @@ class TelegramNotifier:
             emoji = '🔴'
             header = '📉 SAT SİNYALİ'
         else:
-            return  # HOLD sinyali bildirmiyoruz
+            return
 
         reasons = '\n'.join([f"  • {r}" for r in signal_data.get('reasons', [])[1:]])
         symbol_name = signal_data.get('symbol', 'BTC/USDT')
+
+        # Score breakdown formatla
+        breakdown = signal_data.get('score_breakdown', {})
+        breakdown_lines = []
+        for key, val in breakdown.items():
+            if key == 'TOPLAM':
+                breakdown_lines.append(f"  <b>TOPLAM: {val}</b>")
+            else:
+                breakdown_lines.append(f"  {key}: {val}")
+        breakdown_text = '\n'.join(breakdown_lines)
 
         message = (
             f"{emoji} <b>{header}</b>\n"
@@ -85,6 +91,7 @@ class TelegramNotifier:
             f"💰 Fiyat: <code>${signal_data['price']:,.2f}</code>\n"
             f"📊 Skor: <code>{signal_data['score']}</code>\n\n"
             f"📝 <b>Nedenler:</b>\n{reasons}\n\n"
+            f"🔍 <b>Skor Kırılımı:</b>\n{breakdown_text}\n\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
@@ -105,7 +112,9 @@ class TelegramNotifier:
             f"💰 Fiyat: <code>${trade_result.get('price', 0):,.2f}</code>\n"
             f"📦 Miktar: <code>{trade_result.get('amount', 0):.8f} {coin}</code>\n"
             f"💵 Toplam: <code>${trade_result.get('cost', 0):,.2f}</code>\n"
-            f"💸 Komisyon: <code>${trade_result.get('fee', 0):,.4f}</code>\n\n"
+            f"💸 Komisyon: <code>${trade_result.get('fee', 0):,.4f}</code>\n"
+            f"🛑 Stop-Loss: <code>${trade_result.get('stop_loss', 0):,.2f}</code>\n"
+            f"🎯 Take-Profit: <code>${trade_result.get('take_profit', 0):,.2f}</code>\n\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
@@ -124,7 +133,9 @@ class TelegramNotifier:
             f"📌 Çıkış: <code>${result['exit_price']:,.2f}</code>\n"
             f"📦 Miktar: <code>{result['amount']:.8f} {coin}</code>\n\n"
             f"{'💰 Kâr' if result['net_pnl'] > 0 else '💸 Zarar'}: "
-            f"<code>${result['net_pnl']:+,.2f} ({result['pnl_percent']:+.2f}%)</code>\n\n"
+            f"<code>${result['net_pnl']:+,.2f} ({result['pnl_percent']:+.2f}%)</code>\n"
+            f"⏳ Süre: <code>{result['duration']}</code>\n"
+            f"⏳ Cooldown: 2 mum bekleniyor\n\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
@@ -156,13 +167,7 @@ class TelegramNotifier:
         self.send_message(message)
 
     def send_scan_summary(self, scan_results, active_positions=0):
-        """
-        Tarama döngüsü özetini gönderir.
-
-        Args:
-            scan_results: [{symbol, signal, score, price}, ...]
-            active_positions: Açık pozisyon sayısı
-        """
+        """Tarama döngüsü özetini gönderir."""
         now = datetime.now().strftime('%H:%M')
 
         buy_signals = [r for r in scan_results if r['signal'] == 'BUY']
@@ -175,15 +180,14 @@ class TelegramNotifier:
         lines.append(f"🟢 AL: {len(buy_signals)} | 🔴 SAT: {len(sell_signals)} | "
                      f"⚪ BEKLE: {len(hold_signals)} | ⏭ ATLA: {len(skip_signals)}\n")
 
-        # AL sinyalleri (öncelikli göster)
         if buy_signals:
             lines.append("🟢 <b>AL Sinyalleri:</b>")
             for r in sorted(buy_signals, key=lambda x: x['score'], reverse=True):
                 coin = r['symbol'].split('/')[0]
-                lines.append(f"  • {coin} | ${r['price']:,.2f} | skor: {r['score']:+.1f}")
+                regime = r.get('regime', '')
+                lines.append(f"  • {coin} | ${r['price']:,.2f} | skor: {r['score']:+.1f} {regime}")
             lines.append("")
 
-        # SAT sinyalleri
         if sell_signals:
             lines.append("🔴 <b>SAT Sinyalleri:</b>")
             for r in sorted(sell_signals, key=lambda x: x['score']):
@@ -191,25 +195,39 @@ class TelegramNotifier:
                 lines.append(f"  • {coin} | ${r['price']:,.2f} | skor: {r['score']:+.1f}")
             lines.append("")
 
-        # HOLD - sadece en yüksek ve en düşük skorlu 3'er tanesini göster
         if hold_signals:
             sorted_hold = sorted(hold_signals, key=lambda x: x['score'], reverse=True)
-            lines.append("⚪ <b>Beklemede (en güçlü sinyaller):</b>")
-            for r in sorted_hold[:3]:
+            lines.append("⚪ <b>Beklemede:</b>")
+            for r in sorted_hold:
                 coin = r['symbol'].split('/')[0]
-                lines.append(f"  • {coin} | ${r['price']:,.2f} | skor: {r['score']:+.1f}")
-            if len(sorted_hold) > 3:
-                lines.append(f"  ... ve {len(sorted_hold) - 3} coin daha")
+                regime = r.get('regime', '')
+                lines.append(f"  • {coin} | ${r['price']:,.2f} | skor: {r['score']:+.1f} {regime}")
 
-        lines.append(f"\n⏰ Sonraki tarama: ~1 saat sonra")
+        lines.append(f"\n⏰ Sonraki tarama: ~{SCAN_INTERVAL_MINUTES} dakika sonra")
 
         self.send_message('\n'.join(lines))
 
     def send_bot_started(self):
         """Bot başlangıç bildirimi."""
         message = (
-            f"🤖 <b>Bitcoin Bot Başlatıldı!</b>\n\n"
+            f"🤖 <b>Bitcoin Bot Başlatıldı! (Faz 1)</b>\n\n"
+            f"🔧 Yeni özellikler:\n"
+            f"  • Closed candle sinyal\n"
+            f"  • Rejim filtresi (EMA200)\n"
+            f"  • Risk-based sizing (%1/trade)\n"
+            f"  • Cooldown (2 mum)\n"
+            f"  • Fail-safe koruma\n\n"
             f"📊 Piyasa taranıyor...\n"
+            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        self.send_message(message)
+
+    def send_protection_mode(self, reason):
+        """Protection mode bildirimi."""
+        message = (
+            f"🛡️ <b>KORUMA MODU AKTİF</b>\n\n"
+            f"Sebep: <code>{reason}</code>\n"
+            f"Bot yeni işlem açmayacak.\n\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         self.send_message(message)

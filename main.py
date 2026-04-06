@@ -1,6 +1,6 @@
 """
-Bitcoin & Altcoin Trading Bot - Ana Çalıştırma Dosyası
-Tüm modülleri birleştirir, çoklu coin tarar ve botu çalıştırır.
+Bitcoin & Altcoin Trading Bot - Ana Çalıştırma Dosyası (Faz 1)
+Closed candle sinyal, rejim filtresi, risk-based sizing, fail-safe.
 """
 import sys
 import time
@@ -16,7 +16,9 @@ from config.settings import (
     TRADING_MODE, SYMBOL, SYMBOLS, TIMEFRAME,
     BACKTEST_START_DATE, BACKTEST_END_DATE, BACKTEST_INITIAL_BALANCE,
     LOG_FILE, LOG_LEVEL, MULTI_COIN_MODE, MIN_VOLUME_24H, MAX_OPEN_POSITIONS,
-    SCAN_INTERVAL_MINUTES, POSITION_CHECK_INTERVAL
+    SCAN_INTERVAL_MINUTES, POSITION_CHECK_INTERVAL,
+    CLOSED_CANDLE_MODE, MAX_CONSECUTIVE_ERRORS, FAILSAFE_WAIT_SECONDS,
+    MAX_PORTFOLIO_EXPOSURE
 )
 from data.collector import DataCollector
 from data.storage import DataStorage
@@ -32,22 +34,24 @@ def setup_logging():
     """Loglama ayarlarını yapılandırır."""
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+    # Windows'ta UTF-8 encoding zorla (emoji desteği için)
+    import io
+    utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
     logging.basicConfig(
         level=getattr(logging, LOG_LEVEL, logging.INFO),
         format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
         handlers=[
             logging.FileHandler(LOG_FILE, encoding='utf-8'),
-            logging.StreamHandler(sys.stdout)
+            logging.StreamHandler(utf8_stdout)
         ]
     )
 
 
 def run_backtest(symbol=None, start_date=None, end_date=None,
                  initial_balance=None, verbose=True):
-    """
-    Backtesting çalıştırır (tek coin veya çoklu coin).
-    """
+    """Backtesting çalıştırır (tek coin veya çoklu coin)."""
     logger = logging.getLogger('backtest')
 
     start = start_date or BACKTEST_START_DATE
@@ -57,7 +61,6 @@ def run_backtest(symbol=None, start_date=None, end_date=None,
     collector = DataCollector()
     storage = DataStorage()
 
-    # Çoklu coin modu
     if MULTI_COIN_MODE and symbol is None:
         symbols_to_test = SYMBOLS
     else:
@@ -71,7 +74,6 @@ def run_backtest(symbol=None, start_date=None, end_date=None,
         logger.info(f"{'='*60}")
 
         try:
-            # Veri indir
             df = collector.fetch_historical_data(
                 symbol=sym, start_date=start, end_date=end
             )
@@ -80,7 +82,6 @@ def run_backtest(symbol=None, start_date=None, end_date=None,
                 logger.warning(f"⚠️ {sym} için yeterli veri yok, atlanıyor...")
                 continue
 
-            # Backtesting
             engine = BacktestEngine(initial_balance=balance)
             results = engine.run(df, verbose=verbose)
             results['symbol'] = sym
@@ -90,7 +91,6 @@ def run_backtest(symbol=None, start_date=None, end_date=None,
             logger.error(f"❌ {sym} backtesting hatası: {e}")
             continue
 
-    # Çoklu coin sonuç özeti
     if len(all_results) > 1:
         print("\n" + "=" * 70)
         print("📊 ÇOKLU COİN BACKTESTING ÖZET SONUÇLARI")
@@ -115,8 +115,7 @@ def run_backtest(symbol=None, start_date=None, end_date=None,
 def run_live_bot():
     """
     Canlı (veya paper) trading bot çalıştırır.
-    Çoklu coin modunda tüm coinleri tarar, sinyal bulduğunda işlem yapar.
-    Her tarama sonrası Telegram'a özet gönderir.
+    Faz 1: Closed candle sinyal, rejim filtresi, risk-based sizing, fail-safe.
     """
     logger = logging.getLogger('live_bot')
 
@@ -145,39 +144,58 @@ def run_live_bot():
     logger.info(f"💰 Mevcut bakiye: {usdt_balance:.2f} USDT")
 
     # Her coin için ayrı risk manager
-    risk_managers = {}  # {symbol: RiskManager}
+    risk_managers = {}
     executor = TradeExecutor(collector, storage)
 
     # Hangi coinleri tarayacağız
     symbols = SYMBOLS if MULTI_COIN_MODE else [SYMBOL]
+
+    # Closed candle: her sembol için son işlenen mum timestamp'i
+    last_processed_candle = {}  # {symbol: timestamp}
+
+    # Fail-safe: ardışık hata sayacı
+    consecutive_errors = 0
 
     # Telegram bildirimi
     notifier.send_bot_started()
     coin_list = ', '.join([s.split('/')[0] for s in symbols])
     notifier.send_message(
         f"📋 <b>Taranan coinler ({len(symbols)}):</b>\n"
-        f"<code>{coin_list}</code>"
+        f"<code>{coin_list}</code>\n"
+        f"🔧 Closed candle: {'AÇIK' if CLOSED_CANDLE_MODE else 'KAPALI'}\n"
+        f"📊 Rejim filtresi: AÇIK"
     )
 
     logger.info(f"⏰ Bot çalışıyor - {len(symbols)} coin taranıyor")
     logger.info(f"📋 Coinler: {coin_list}")
+    logger.info(f"🔧 Closed candle mode: {CLOSED_CANDLE_MODE}")
 
     scan_count = 0
 
     while True:
         try:
             scan_count += 1
-            scan_results = []  # Her tarama döngüsünün sonuçları
+            scan_results = []
 
             active_positions = sum(
                 1 for rm in risk_managers.values()
                 if rm.active_position is not None
             )
 
+            # Toplam portföy maruziyeti hesapla
+            total_exposure = sum(
+                rm.active_position['entry_price'] * rm.active_position['amount']
+                for rm in risk_managers.values()
+                if rm.active_position is not None
+            )
+
             logger.info(f"\n{'─'*50}")
             logger.info(f"🔄 TARAMA #{scan_count} başlıyor ({len(symbols)} coin)...")
             logger.info(f"📌 Aktif pozisyon: {active_positions}/{MAX_OPEN_POSITIONS}")
+            logger.info(f"💼 Portföy maruziyeti: ${total_exposure:,.2f}")
             logger.info(f"{'─'*50}")
+
+            new_candle_detected = False
 
             for symbol in symbols:
                 try:
@@ -192,7 +210,32 @@ def run_live_bot():
                         })
                         continue
 
-                    # Hacim filtresi (düşük hacimli coinleri atla)
+                    # ─── Closed Candle Modu ─────────────────────
+                    if CLOSED_CANDLE_MODE:
+                        # Son mum (incomplete) hariç, bir önceki (closed) mumu kullan
+                        last_candle_ts = df.index[-2]  # Son kapanmış mum
+                        current_candle_ts = df.index[-1]  # Şu an açık mum
+
+                        prev_ts = last_processed_candle.get(symbol)
+
+                        if prev_ts is not None and last_candle_ts <= prev_ts:
+                            # Aynı mum zaten işlendi — tekrar sinyal üretme
+                            scan_results.append({
+                                'symbol': symbol, 'signal': 'SKIP',
+                                'score': 0, 'price': float(df['close'].iloc[-1]),
+                                'reason': 'Aynı mum (bekleniyor)'
+                            })
+                            continue
+
+                        # Yeni mum kapanmış! İşaretle
+                        last_processed_candle[symbol] = last_candle_ts
+                        new_candle_detected = True
+                        logger.info(f"🕐 {symbol} yeni mum kapandı: {last_candle_ts}")
+
+                        # Son satırı (incomplete candle) çıkar
+                        df = df.iloc[:-1]
+
+                    # Hacim filtresi
                     try:
                         ticker = collector.fetch_ticker(symbol)
                         volume_usd = ticker.get('volume', 0) * ticker.get('last', 0)
@@ -210,9 +253,8 @@ def run_live_bot():
                     df = TechnicalIndicators.calculate_all(df)
                     current_price = df['close'].iloc[-1]
 
-                    # Yeterli veri var mı kontrol et
                     if len(df) < 200:
-                        logger.warning(f"⚠️ {symbol} yetersiz veri: {len(df)} mum (min 200 gerekli)")
+                        logger.warning(f"⚠️ {symbol} yetersiz veri: {len(df)} mum (min 200)")
                         scan_results.append({
                             'symbol': symbol, 'signal': 'SKIP',
                             'score': 0, 'price': current_price
@@ -225,6 +267,10 @@ def run_live_bot():
                         risk_managers[symbol] = RiskManager(per_coin_balance)
 
                     rm = risk_managers[symbol]
+
+                    # Yeni mum kapandığında cooldown azalt
+                    if CLOSED_CANDLE_MODE and new_candle_detected:
+                        rm.decrement_cooldown()
 
                     # ─── Aktif Pozisyon Kontrolü ────────────────
                     if rm.active_position is not None:
@@ -256,26 +302,28 @@ def run_live_bot():
                         # ─── Sinyal Üret ───────────────────────
                         signal_result = signal_generator.generate_signal(df)
 
-                        # Her coin için sinyal skorunu logla
                         coin_name = symbol.split('/')[0]
+                        regime = signal_result.get('score_breakdown', {}).get('Regime', '')
+                        regime_short = '🐻' if 'BEARISH' in regime else '🐂'
+
                         logger.info(
                             f"📊 {coin_name:>5} | ${current_price:>10,.2f} | "
                             f"Skor: {signal_result['score']:>+6.1f} | "
-                            f"{signal_result['signal']}"
+                            f"{signal_result['signal']} {regime_short}"
                         )
 
                         scan_results.append({
                             'symbol': symbol,
                             'signal': signal_result['signal'],
                             'score': signal_result['score'],
-                            'price': current_price
+                            'price': current_price,
+                            'regime': regime_short,
                         })
 
                         if signal_result['signal'] == 'BUY':
                             signal_result['symbol'] = symbol
                             notifier.send_signal(signal_result)
 
-                            # Çok fazla açık pozisyon var mı?
                             if active_positions >= MAX_OPEN_POSITIONS:
                                 logger.info(f"⚠️ {symbol} AL sinyali var ama max pozisyon ({MAX_OPEN_POSITIONS}) doldu")
                                 continue
@@ -284,30 +332,37 @@ def run_live_bot():
                             current_balance = balance_info.get('USDT', {}).get('free', 0)
 
                             can_open, reason = rm.can_open_position(
-                                current_balance, signal_result
+                                current_balance, signal_result, total_exposure
                             )
 
                             if can_open:
+                                # ATR varsa dinamik, yoksa sabit stop
+                                atr_val = df['atr'].iloc[-1] if 'atr' in df.columns else None
+
                                 position = rm.calculate_position_size(
-                                    current_balance, current_price
+                                    current_balance, current_price, atr=atr_val
                                 )
 
-                                buy_result = executor.execute_buy(
-                                    symbol=symbol,
-                                    amount=position['btc_amount'],
-                                    price=None
-                                )
-
-                                if buy_result:
-                                    rm.open_position(
-                                        'buy',
-                                        buy_result.get('price', current_price),
-                                        buy_result.get('amount', position['btc_amount'])
+                                if position['coin_amount'] > 0:
+                                    buy_result = executor.execute_buy(
+                                        symbol=symbol,
+                                        amount=position['coin_amount'],
+                                        price=None
                                     )
-                                    buy_result['symbol'] = symbol
-                                    notifier.send_trade_notification(buy_result)
-                                    active_positions += 1
 
+                                    if buy_result:
+                                        rm.open_position(
+                                            'buy',
+                                            buy_result.get('price', current_price),
+                                            buy_result.get('amount', position['coin_amount']),
+                                            atr=atr_val,
+                                            stop_loss_price=position['stop_loss_price']
+                                        )
+                                        buy_result['symbol'] = symbol
+                                        buy_result['stop_loss'] = position['stop_loss_price']
+                                        buy_result['take_profit'] = rm.active_position['take_profit']
+                                        notifier.send_trade_notification(buy_result)
+                                        active_positions += 1
                             else:
                                 logger.info(f"⚠️ {symbol} pozisyon açılamadı: {reason}")
 
@@ -315,15 +370,26 @@ def run_live_bot():
                             signal_result['symbol'] = symbol
                             notifier.send_signal(signal_result)
 
-                    # Borsayı spam'lamemek için bekleme (50 coin için optimize)
                     time.sleep(1)
+                    consecutive_errors = 0  # Başarılı işlem, hata sayacı sıfırla
 
                 except Exception as e:
                     logger.error(f"❌ {symbol} işleme hatası: {e}")
+                    consecutive_errors += 1
                     scan_results.append({
                         'symbol': symbol, 'signal': 'SKIP',
                         'score': 0, 'price': 0
                     })
+
+                    # ─── Fail-Safe ─────────────────────────────
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        logger.error(f"🛡️ FAIL-SAFE: {consecutive_errors} ardışık hata! {FAILSAFE_WAIT_SECONDS}s bekleniyor.")
+                        notifier.send_error(
+                            f"Fail-safe aktif: {consecutive_errors} ardışık hata.\n"
+                            f"{FAILSAFE_WAIT_SECONDS}s bekleniyor."
+                        )
+                        time.sleep(FAILSAFE_WAIT_SECONDS)
+                        consecutive_errors = 0
                     continue
 
             # ─── Tarama Özeti Gönder ──────────────────────────
@@ -339,13 +405,12 @@ def run_live_bot():
                         f"⚪ BEKLE: {hold_count} | ⏭ ATLA: {skip_count}")
             logger.info(f"{'─'*50}\n")
 
-            # Telegram'a özet gönder
-            notifier.send_scan_summary(scan_results, active_positions)
+            # Sadece yeni mum kapandığında Telegram özeti gönder (spam önleme)
+            if not CLOSED_CANDLE_MODE or new_candle_detected:
+                notifier.send_scan_summary(scan_results, active_positions)
 
             # ─── Periyodik Bekleme ─────────────────────────────
-            # Her 5 dakikada bir açık pozisyonları kontrol et
-            # SCAN_INTERVAL_MINUTES dk sonra tekrar tam tarama yapılacak
-            wait_cycles = SCAN_INTERVAL_MINUTES // 5  # 15dk / 5dk = 3 döngü
+            wait_cycles = max(1, SCAN_INTERVAL_MINUTES // 5)
             logger.info(f"⏳ {SCAN_INTERVAL_MINUTES} dakika bekleniyor (sonraki tarama: ~{SCAN_INTERVAL_MINUTES}dk)")
 
             for cycle in range(wait_cycles):
@@ -421,12 +486,17 @@ def check_signal_now():
 
             price = result['price']
             rsi = summary['rsi']
+            regime = result.get('score_breakdown', {}).get('Regime', '')
 
             print(f"  {signal_emoji} {symbol:<12} | "
                   f"${price:>10,.2f} | "
                   f"RSI: {rsi:5.1f} | "
                   f"Skor: {result['score']:>+6.1f} | "
                   f"{result['signal']}")
+
+            # Score breakdown göster
+            for key, val in result.get('score_breakdown', {}).items():
+                print(f"       {key}: {val}")
 
             if result['signal'] in ('BUY', 'SELL'):
                 signals_found.append({
@@ -437,7 +507,7 @@ def check_signal_now():
                     'reasons': result['reasons'],
                 })
 
-            time.sleep(1)  # Rate limit
+            time.sleep(1)
 
         except Exception as e:
             print(f"  ❌ {symbol:<12} | Hata: {e}")
@@ -483,11 +553,14 @@ def main():
     coins = SYMBOLS if MULTI_COIN_MODE else [SYMBOL]
 
     logger.info("=" * 50)
-    logger.info("🪙 CRYPTO TRADING BOT")
+    logger.info("🪙 CRYPTO TRADING BOT (Faz 1)")
     logger.info(f"   Mod: {mode.upper()}")
     logger.info(f"   Çoklu Coin: {'AÇIK' if MULTI_COIN_MODE else 'KAPALI'}")
     logger.info(f"   Coin Sayısı: {len(coins)}")
     logger.info(f"   Zaman Dilimi: {TIMEFRAME}")
+    logger.info(f"   Closed Candle: {CLOSED_CANDLE_MODE}")
+    logger.info(f"   Rejim Filtresi: AÇIK")
+    logger.info(f"   Risk/Trade: 1%")
     logger.info("=" * 50)
 
     if mode == 'backtest':

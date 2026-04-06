@@ -32,3 +32,9 @@ Thumbs.db
 # Logs
 *.log
 logs/
+*.env
+.env
+logs/
+data/historical/*.db
+__pycache__/
+*.zip

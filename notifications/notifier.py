@@ -155,6 +155,56 @@ class TelegramNotifier:
         )
         self.send_message(message)
 
+    def send_scan_summary(self, scan_results, active_positions=0):
+        """
+        Tarama döngüsü özetini gönderir.
+
+        Args:
+            scan_results: [{symbol, signal, score, price}, ...]
+            active_positions: Açık pozisyon sayısı
+        """
+        now = datetime.now().strftime('%H:%M')
+
+        buy_signals = [r for r in scan_results if r['signal'] == 'BUY']
+        sell_signals = [r for r in scan_results if r['signal'] == 'SELL']
+        hold_signals = [r for r in scan_results if r['signal'] == 'HOLD']
+        skip_signals = [r for r in scan_results if r['signal'] == 'SKIP']
+
+        lines = [f"📊 <b>TARAMA ÖZETİ</b> ({now})\n"]
+        lines.append(f"📌 Aktif Pozisyon: {active_positions}")
+        lines.append(f"🟢 AL: {len(buy_signals)} | 🔴 SAT: {len(sell_signals)} | "
+                     f"⚪ BEKLE: {len(hold_signals)} | ⏭ ATLA: {len(skip_signals)}\n")
+
+        # AL sinyalleri (öncelikli göster)
+        if buy_signals:
+            lines.append("🟢 <b>AL Sinyalleri:</b>")
+            for r in sorted(buy_signals, key=lambda x: x['score'], reverse=True):
+                coin = r['symbol'].split('/')[0]
+                lines.append(f"  • {coin} | ${r['price']:,.2f} | skor: {r['score']:+.1f}")
+            lines.append("")
+
+        # SAT sinyalleri
+        if sell_signals:
+            lines.append("🔴 <b>SAT Sinyalleri:</b>")
+            for r in sorted(sell_signals, key=lambda x: x['score']):
+                coin = r['symbol'].split('/')[0]
+                lines.append(f"  • {coin} | ${r['price']:,.2f} | skor: {r['score']:+.1f}")
+            lines.append("")
+
+        # HOLD - sadece en yüksek ve en düşük skorlu 3'er tanesini göster
+        if hold_signals:
+            sorted_hold = sorted(hold_signals, key=lambda x: x['score'], reverse=True)
+            lines.append("⚪ <b>Beklemede (en güçlü sinyaller):</b>")
+            for r in sorted_hold[:3]:
+                coin = r['symbol'].split('/')[0]
+                lines.append(f"  • {coin} | ${r['price']:,.2f} | skor: {r['score']:+.1f}")
+            if len(sorted_hold) > 3:
+                lines.append(f"  ... ve {len(sorted_hold) - 3} coin daha")
+
+        lines.append(f"\n⏰ Sonraki tarama: ~1 saat sonra")
+
+        self.send_message('\n'.join(lines))
+
     def send_bot_started(self):
         """Bot başlangıç bildirimi."""
         message = (

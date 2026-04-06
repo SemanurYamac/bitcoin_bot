@@ -24,8 +24,8 @@ class SignalGenerator:
     }
 
     # Karar eşikleri
-    BUY_THRESHOLD = 5.0    # Bu puan üstünde AL sinyali
-    SELL_THRESHOLD = -5.0   # Bu puan altında SAT sinyali
+    BUY_THRESHOLD = 4.0    # Bu puan üstünde AL sinyali (max skor: 9.3)
+    SELL_THRESHOLD = -4.0   # Bu puan altında SAT sinyali
 
     def generate_signal(self, df, index=-1):
         """

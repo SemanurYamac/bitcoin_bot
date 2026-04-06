@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config.settings import (
     TRADING_MODE, SYMBOL, SYMBOLS, TIMEFRAME,
     BACKTEST_START_DATE, BACKTEST_END_DATE, BACKTEST_INITIAL_BALANCE,
-    LOG_FILE, LOG_LEVEL, MULTI_COIN_MODE, MIN_VOLUME_24H, MAX_OPEN_POSITIONS
+    LOG_FILE, LOG_LEVEL, MULTI_COIN_MODE, MIN_VOLUME_24H, MAX_OPEN_POSITIONS,
+    SCAN_INTERVAL_MINUTES, POSITION_CHECK_INTERVAL
 )
 from data.collector import DataCollector
 from data.storage import DataStorage
@@ -115,6 +116,7 @@ def run_live_bot():
     """
     Canlı (veya paper) trading bot çalıştırır.
     Çoklu coin modunda tüm coinleri tarar, sinyal bulduğunda işlem yapar.
+    Her tarama sonrası Telegram'a özet gönderir.
     """
     logger = logging.getLogger('live_bot')
 
@@ -160,12 +162,22 @@ def run_live_bot():
     logger.info(f"⏰ Bot çalışıyor - {len(symbols)} coin taranıyor")
     logger.info(f"📋 Coinler: {coin_list}")
 
+    scan_count = 0
+
     while True:
         try:
+            scan_count += 1
+            scan_results = []  # Her tarama döngüsünün sonuçları
+
             active_positions = sum(
                 1 for rm in risk_managers.values()
                 if rm.active_position is not None
             )
+
+            logger.info(f"\n{'─'*50}")
+            logger.info(f"🔄 TARAMA #{scan_count} başlıyor ({len(symbols)} coin)...")
+            logger.info(f"📌 Aktif pozisyon: {active_positions}/{MAX_OPEN_POSITIONS}")
+            logger.info(f"{'─'*50}")
 
             for symbol in symbols:
                 try:
@@ -173,20 +185,39 @@ def run_live_bot():
                     df = collector.fetch_ohlcv(symbol=symbol, limit=300)
 
                     if df.empty:
+                        logger.warning(f"⚠️ {symbol} boş veri döndü")
+                        scan_results.append({
+                            'symbol': symbol, 'signal': 'SKIP',
+                            'score': 0, 'price': 0
+                        })
                         continue
 
                     # Hacim filtresi (düşük hacimli coinleri atla)
                     try:
                         ticker = collector.fetch_ticker(symbol)
-                        if ticker.get('volume', 0) * ticker.get('last', 0) < MIN_VOLUME_24H:
+                        volume_usd = ticker.get('volume', 0) * ticker.get('last', 0)
+                        if volume_usd < MIN_VOLUME_24H:
+                            logger.info(f"⏭ {symbol} düşük hacim (${volume_usd:,.0f} < ${MIN_VOLUME_24H:,.0f}), atlanıyor")
+                            scan_results.append({
+                                'symbol': symbol, 'signal': 'SKIP',
+                                'score': 0, 'price': ticker.get('last', 0)
+                            })
                             continue
                     except Exception:
                         pass
 
                     # ─── Göstergeleri Hesapla ───────────────────
                     df = TechnicalIndicators.calculate_all(df)
-
                     current_price = df['close'].iloc[-1]
+
+                    # Yeterli veri var mı kontrol et
+                    if len(df) < 200:
+                        logger.warning(f"⚠️ {symbol} yetersiz veri: {len(df)} mum (min 200 gerekli)")
+                        scan_results.append({
+                            'symbol': symbol, 'signal': 'SKIP',
+                            'score': 0, 'price': current_price
+                        })
+                        continue
 
                     # Risk manager oluştur (yoksa)
                     if symbol not in risk_managers:
@@ -216,9 +247,29 @@ def run_live_bot():
                                 notifier.send_position_closed(close_result)
                                 logger.info(f"📌 {symbol} pozisyon kapatıldı: {exit_reason}")
 
+                        scan_results.append({
+                            'symbol': symbol, 'signal': 'POSITION',
+                            'score': 0, 'price': current_price
+                        })
+
                     else:
                         # ─── Sinyal Üret ───────────────────────
                         signal_result = signal_generator.generate_signal(df)
+
+                        # Her coin için sinyal skorunu logla
+                        coin_name = symbol.split('/')[0]
+                        logger.info(
+                            f"📊 {coin_name:>5} | ${current_price:>10,.2f} | "
+                            f"Skor: {signal_result['score']:>+6.1f} | "
+                            f"{signal_result['signal']}"
+                        )
+
+                        scan_results.append({
+                            'symbol': symbol,
+                            'signal': signal_result['signal'],
+                            'score': signal_result['score'],
+                            'price': current_price
+                        })
 
                         if signal_result['signal'] == 'BUY':
                             signal_result['symbol'] = symbol
@@ -264,16 +315,40 @@ def run_live_bot():
                             signal_result['symbol'] = symbol
                             notifier.send_signal(signal_result)
 
-                    # Borsayı spam'lamemek için bekleme
-                    time.sleep(2)
+                    # Borsayı spam'lamemek için bekleme (50 coin için optimize)
+                    time.sleep(1)
 
                 except Exception as e:
                     logger.error(f"❌ {symbol} işleme hatası: {e}")
+                    scan_results.append({
+                        'symbol': symbol, 'signal': 'SKIP',
+                        'score': 0, 'price': 0
+                    })
                     continue
+
+            # ─── Tarama Özeti Gönder ──────────────────────────
+            logger.info(f"\n{'─'*50}")
+            logger.info(f"✅ TARAMA #{scan_count} tamamlandı - {len(scan_results)} coin tarandı")
+
+            buy_count = sum(1 for r in scan_results if r['signal'] == 'BUY')
+            sell_count = sum(1 for r in scan_results if r['signal'] == 'SELL')
+            hold_count = sum(1 for r in scan_results if r['signal'] == 'HOLD')
+            skip_count = sum(1 for r in scan_results if r['signal'] == 'SKIP')
+
+            logger.info(f"   🟢 AL: {buy_count} | 🔴 SAT: {sell_count} | "
+                        f"⚪ BEKLE: {hold_count} | ⏭ ATLA: {skip_count}")
+            logger.info(f"{'─'*50}\n")
+
+            # Telegram'a özet gönder
+            notifier.send_scan_summary(scan_results, active_positions)
 
             # ─── Periyodik Bekleme ─────────────────────────────
             # Her 5 dakikada bir açık pozisyonları kontrol et
-            for _ in range(12):  # 12 x 5dk = 60dk = 1 saat
+            # SCAN_INTERVAL_MINUTES dk sonra tekrar tam tarama yapılacak
+            wait_cycles = SCAN_INTERVAL_MINUTES // 5  # 15dk / 5dk = 3 döngü
+            logger.info(f"⏳ {SCAN_INTERVAL_MINUTES} dakika bekleniyor (sonraki tarama: ~{SCAN_INTERVAL_MINUTES}dk)")
+
+            for cycle in range(wait_cycles):
                 for sym, rm in list(risk_managers.items()):
                     if rm.active_position:
                         try:
@@ -300,7 +375,7 @@ def run_live_bot():
 
                         except Exception as e:
                             logger.error(f"❌ {sym} periyodik kontrol hatası: {e}")
-                time.sleep(300)
+                time.sleep(POSITION_CHECK_INTERVAL)
 
         except KeyboardInterrupt:
             logger.info("🛑 Bot kullanıcı tarafından durduruldu")

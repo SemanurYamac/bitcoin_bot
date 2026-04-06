@@ -1,6 +1,10 @@
 """
 Bitcoin Trading Bot - Veri Toplama Modülü
 CCXT kütüphanesi ile Binance'den veri çeker.
+
+ÖNEMLİ: Piyasa verisi (fiyat, mum, ticker) her zaman GERÇEK Binance'den çekilir.
+Testnet sadece bakiye ve emir işlemleri için kullanılır.
+Testnet'in sınırlı geçmiş verisi olduğu için bu ayrım şarttır.
 """
 import ccxt
 import pandas as pd
@@ -24,6 +28,14 @@ class DataCollector:
         Args:
             use_testnet: True ise Binance testnet (paper trading) kullanır
         """
+        # ─── Piyasa Verisi İçin GERÇEK Binance (API key gerekmez) ───
+        self.public_exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot'},
+        })
+        logger.info("📊 Gerçek Binance piyasa verisi bağlantısı kuruldu")
+
+        # ─── Emir ve Bakiye İşlemleri İçin Exchange ─────────────────
         if use_testnet or TRADING_MODE == 'paper':
             self.exchange = ccxt.binance({
                 'apiKey': BINANCE_TESTNET_API_KEY,
@@ -32,7 +44,7 @@ class DataCollector:
                 'options': {'defaultType': 'spot'},
             })
             self.exchange.set_sandbox_mode(True)
-            logger.info("📋 Binance TESTNET bağlantısı kuruldu (Paper Trading)")
+            logger.info("📋 Binance TESTNET bağlantısı kuruldu (Paper Trading - emir/bakiye)")
         elif TRADING_MODE == 'live':
             self.exchange = ccxt.binance({
                 'apiKey': BINANCE_API_KEY,
@@ -42,16 +54,14 @@ class DataCollector:
             })
             logger.info("🔴 Binance CANLI bağlantı kuruldu!")
         else:
-            # Backtest modu - kimlik doğrulama gerekmez
-            self.exchange = ccxt.binance({
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'},
-            })
+            # Backtest modu
+            self.exchange = self.public_exchange
             logger.info("📊 Binance bağlantısı kuruldu (Backtest modu - sadece veri)")
 
     def fetch_ohlcv(self, symbol=None, timeframe=None, since=None, limit=500):
         """
-        OHLCV (mum) verilerini çeker.
+        OHLCV (mum) verilerini GERÇEK Binance'den çeker.
+        Testnet sınırlı veri döndüğü için her zaman gerçek API kullanılır.
 
         Args:
             symbol: İşlem çifti (varsayılan: BTC/USDT)
@@ -66,7 +76,8 @@ class DataCollector:
         timeframe = timeframe or TIMEFRAME
 
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            # Gerçek Binance'den veri çek (testnet değil!)
+            ohlcv = self.public_exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
 
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -91,20 +102,10 @@ class DataCollector:
         """
         Belirtilen tarih aralığında tüm geçmiş verileri çeker.
         API limitleri nedeniyle parçalar halinde çeker.
-
-        Args:
-            symbol: İşlem çifti
-            timeframe: Zaman dilimi
-            start_date: Başlangıç tarihi (YYYY-MM-DD)
-            end_date: Bitiş tarihi (YYYY-MM-DD), None ise şimdiki zaman
-
-        Returns:
-            pandas DataFrame: Tüm geçmiş veriler
         """
         symbol = symbol or SYMBOL
         timeframe = timeframe or TIMEFRAME
 
-        # Tarihleri timestamp'e çevir
         since = int(datetime.strptime(start_date, '%Y-%m-%d').timestamp() * 1000)
 
         if end_date:
@@ -119,25 +120,22 @@ class DataCollector:
 
         while current_since < end_ts:
             try:
-                ohlcv = self.exchange.fetch_ohlcv(
+                ohlcv = self.public_exchange.fetch_ohlcv(
                     symbol, timeframe,
                     since=current_since,
-                    limit=1000  # Binance max limit
+                    limit=1000
                 )
 
                 if not ohlcv:
                     break
 
                 all_data.extend(ohlcv)
-
-                # Son mumun timestamp'ini al, bir sonraki istekte oradan devam et
                 current_since = ohlcv[-1][0] + 1
-                
+
                 logger.info(f"  📦 {len(all_data)} mum indirildi... "
                            f"({datetime.fromtimestamp(current_since/1000).strftime('%Y-%m-%d %H:%M')})")
 
-                # Rate limit'e saygı göster
-                time.sleep(self.exchange.rateLimit / 1000)
+                time.sleep(self.public_exchange.rateLimit / 1000)
 
             except ccxt.NetworkError as e:
                 logger.warning(f"⚠️ Ağ hatası, 10 saniye bekleniyor: {e}")
@@ -155,10 +153,9 @@ class DataCollector:
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         df = df.astype(float)
-        df = df[~df.index.duplicated(keep='first')]  # Duplikasyonları temizle
+        df = df[~df.index.duplicated(keep='first')]
         df.sort_index(inplace=True)
 
-        # Bitiş tarihine göre filtrele
         if end_date:
             df = df[:end_date]
 
@@ -166,10 +163,10 @@ class DataCollector:
         return df
 
     def fetch_ticker(self, symbol=None):
-        """Anlık fiyat bilgisi çeker."""
+        """Anlık fiyat bilgisi çeker (gerçek Binance'den)."""
         symbol = symbol or SYMBOL
         try:
-            ticker = self.exchange.fetch_ticker(symbol)
+            ticker = self.public_exchange.fetch_ticker(symbol)
             return {
                 'symbol': symbol,
                 'last': ticker['last'],
@@ -184,7 +181,7 @@ class DataCollector:
             raise
 
     def fetch_balance(self):
-        """Hesap bakiyesini çeker (sadece live/paper modda)."""
+        """Hesap bakiyesini çeker (testnet/live exchange üzerinden)."""
         if TRADING_MODE == 'backtest':
             logger.warning("⚠️ Backtest modunda bakiye çekilemez")
             return {}
@@ -205,11 +202,18 @@ class DataCollector:
             raise
 
     def check_connection(self):
-        """Borsa bağlantısını kontrol eder."""
+        """Borsa bağlantısını kontrol eder (hem gerçek hem testnet)."""
         try:
-            self.exchange.load_markets()
-            ticker = self.exchange.fetch_ticker(SYMBOL)
+            # Gerçek Binance piyasa verisi testi
+            self.public_exchange.load_markets()
+            ticker = self.public_exchange.fetch_ticker(SYMBOL)
             logger.info(f"✅ Bağlantı başarılı! {SYMBOL} son fiyat: ${ticker['last']:,.2f}")
+
+            # Testnet/live emir bağlantısı testi
+            if TRADING_MODE in ('paper', 'live'):
+                self.exchange.load_markets()
+                logger.info("✅ Emir bağlantısı başarılı!")
+
             return True
         except Exception as e:
             logger.error(f"❌ Bağlantı hatası: {e}")

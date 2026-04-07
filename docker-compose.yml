@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  bitcoin_abot:
+    build: .
+    container_name: btc_trading_bot
+    # Bot çökerse veya sunucu yeniden başlarsa sonsuza kadar otomatik restart atar
+    restart: always  
+    environment:
+      - PYTHONUTF8=1
+      # İsterseniz timezone'u değiştirebilirsiniz
+      - TZ=Europe/Istanbul 
+    volumes:
+      # Verilerin silinmemesi için konteyner dışına köprü kuruyoruz
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Ortam değişkenlerinizi içeri aktarıyoruz
+      - ./.env:/app/.env

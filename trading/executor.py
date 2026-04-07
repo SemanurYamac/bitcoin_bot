@@ -60,17 +60,39 @@ class TradeExecutor:
                         symbol, amount
                     )
 
+                status = order.get('status', 'unknown')
+                
+                # Gerçekten alınan miktarı borsadan çek
+                filled_amount = order.get('filled')
+                if filled_amount is None:
+                    filled_amount = amount  # CCXT fallback
+                    
+                actual_price = order.get('average') or order.get('price') or price
+                actual_cost = order.get('cost', filled_amount * (actual_price or 0))
+
+                # Kısmi gerçekleşme (Partial Fill) Yönetimi
+                if status in ('open', 'partially_filled') and filled_amount < amount:
+                    logger.warning(
+                        f"⚠️ KISMİ GERÇEKLEŞME (Partial Fill) tespit edildi! "
+                        f"İstenen: {amount:.8f}, Alınan: {filled_amount:.8f}"
+                    )
+                    if filled_amount <= 0:
+                        logger.error(f"❌ Alım hiç gerçekleşmedi (Filled: 0). Bekleyen emir iptal ediliyor.")
+                        self.cancel_order(order.get('id'), symbol)
+                        return None
+
                 result = {
                     'id': order.get('id', ''),
                     'symbol': symbol,
                     'side': 'buy',
-                    'price': order.get('average', order.get('price', price)),
-                    'amount': order.get('filled', amount),
-                    'cost': order.get('cost', 0),
-                    'fee': order.get('fee', {}).get('cost', 0),
+                    'price': actual_price,
+                    'amount': filled_amount,
+                    'cost': actual_cost,
+                    'fee': order.get('fee', {}).get('cost', 0) if isinstance(order.get('fee'), dict) else 0,
                     'timestamp': datetime.now(),
-                    'status': order.get('status', 'unknown'),
+                    'status': status,
                     'mode': self.mode,
+                    'partial_fill': (filled_amount < amount)
                 }
             else:
                 raise ValueError(f"Bilinmeyen mod: {self.mode}")
@@ -84,7 +106,7 @@ class TradeExecutor:
 
             logger.info(
                 f"🟢 ALIM EMRİ YÜRÜTÜLDÜ | "
-                f"{amount:.6f} BTC @ ${result['price']:,.2f} | "
+                f"{result['amount']:.6f} {symbol} @ ${result['price']:,.2f} | "
                 f"Toplam: ${result['cost']:,.2f} | "
                 f"Komisyon: ${result.get('fee', 0):,.2f}"
             )
@@ -133,17 +155,38 @@ class TradeExecutor:
                         symbol, amount
                     )
 
+                status = order.get('status', 'unknown')
+                
+                # Gerçekten satılan miktarı borsadan çek
+                filled_amount = order.get('filled')
+                if filled_amount is None:
+                    filled_amount = amount
+                    
+                actual_price = order.get('average') or order.get('price') or price
+                actual_cost = order.get('cost', filled_amount * (actual_price or 0))
+
+                if status in ('open', 'partially_filled') and filled_amount < amount:
+                    logger.warning(
+                        f"⚠️ KISMİ SATIŞ (Partial Fill) tespit edildi! "
+                        f"İstenen: {amount:.8f}, Satılan: {filled_amount:.8f}"
+                    )
+                    if filled_amount <= 0:
+                        logger.error(f"❌ Satış hiç gerçekleşmedi (Filled: 0). Bekleyen emir iptal ediliyor.")
+                        self.cancel_order(order.get('id'), symbol)
+                        return None
+
                 result = {
                     'id': order.get('id', ''),
                     'symbol': symbol,
                     'side': 'sell',
-                    'price': order.get('average', order.get('price', price)),
-                    'amount': order.get('filled', amount),
-                    'cost': order.get('cost', 0),
-                    'fee': order.get('fee', {}).get('cost', 0),
+                    'price': actual_price,
+                    'amount': filled_amount,
+                    'cost': actual_cost,
+                    'fee': order.get('fee', {}).get('cost', 0) if isinstance(order.get('fee'), dict) else 0,
                     'timestamp': datetime.now(),
-                    'status': order.get('status', 'unknown'),
+                    'status': status,
                     'mode': self.mode,
+                    'partial_fill': (filled_amount < amount)
                 }
             else:
                 raise ValueError(f"Bilinmeyen mod: {self.mode}")
@@ -156,7 +199,7 @@ class TradeExecutor:
 
             logger.info(
                 f"🔴 SATIM EMRİ YÜRÜTÜLDÜ | "
-                f"{amount:.6f} BTC @ ${result['price']:,.2f} | "
+                f"{result['amount']:.6f} {symbol} @ ${result['price']:,.2f} | "
                 f"Toplam: ${result['cost']:,.2f} | "
                 f"Komisyon: ${result.get('fee', 0):,.2f}"
             )

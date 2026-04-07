@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 class RiskManager:
     """Risk yönetimi — risk-based sizing, cooldown, drawdown koruması."""
 
-    def __init__(self, initial_balance):
+    def __init__(self, symbol, initial_balance, state_manager=None):
+        self.symbol = symbol
+        self.state_manager = state_manager
         self.initial_balance = initial_balance
         self.peak_balance = initial_balance
         self.daily_trades = 0
@@ -28,6 +30,27 @@ class RiskManager:
         self.cooldown_remaining = 0
         # Protection mode
         self.protection_mode = False
+
+        self._load_state()
+
+    def _load_state(self):
+        """Disk üzerinde kaydedilmiş bir state varsa (çökme sonrası) geri yükler."""
+        if self.state_manager:
+            stored_state = self.state_manager.get_coin_state(self.symbol)
+            if stored_state:
+                self.active_position = stored_state.get('active_position')
+                self.cooldown_remaining = stored_state.get('cooldown_remaining', 0)
+                if self.active_position:
+                    logger.info(f"🔄 {self.symbol} için yarım kalan pozisyon başarıyla geri yüklendi.")
+
+    def _save_state(self):
+        """Mevcut risk durumunu diske kaydeder."""
+        if self.state_manager:
+            state_data = {
+                'active_position': self.active_position,
+                'cooldown_remaining': self.cooldown_remaining
+            }
+            self.state_manager.save_coin_state(self.symbol, state_data)
 
     def can_open_position(self, current_balance, signal, total_exposure=0):
         """
@@ -172,7 +195,7 @@ class RiskManager:
             'trailing_activated': False,
             'highest_price': entry_price if side == 'buy' else None,
             'lowest_price': entry_price if side == 'sell' else None,
-            'open_time': open_time or datetime.now(),
+            'open_time': (open_time or datetime.now()).isoformat(),
         }
 
         self.daily_trades += 1
@@ -186,6 +209,7 @@ class RiskManager:
             f"Take-Profit: ${take_profit:,.2f}"
         )
 
+        self._save_state()
         return self.active_position
 
     def check_exit_conditions(self, current_price):
@@ -215,20 +239,27 @@ class RiskManager:
 
         # ─── Trailing Stop Kontrolü ────────────────────────────
         if side == 'buy':
+            state_changed = False
             if current_price > pos.get('highest_price', pos['entry_price']):
                 pos['highest_price'] = current_price
                 pos['trailing_stop'] = current_price * (1 - TRAILING_STOP_PERCENT)
+                state_changed = True
 
             # Trailing sadece yeterli kâr oluşunca aktif
             min_profit_price = pos['entry_price'] * (1 + TRAILING_ACTIVATION)
             if pos.get('trailing_stop') and current_price <= pos['trailing_stop']:
                 if pos['highest_price'] >= min_profit_price:
                     pos['trailing_activated'] = True
+                    self._save_state()
                     return True, f"Trailing Stop tetiklendi (${pos['trailing_stop']:,.2f})"
+                    
+            if state_changed:
+                self._save_state()
 
         # ─── Max Pozisyon Süresi (48 saat) ─────────────────────
         if 'open_time' in pos:
-            hold_duration = datetime.now() - pos['open_time']
+            open_dt = datetime.fromisoformat(pos['open_time'])
+            hold_duration = datetime.now() - open_dt
             if hold_duration.total_seconds() > 48 * 3600:
                 current_pnl = (current_price - pos['entry_price']) / pos['entry_price']
                 if current_pnl < -0.01:
@@ -267,7 +298,7 @@ class RiskManager:
             'fee': round(fee, 2),
             'net_pnl': round(net_pnl, 2),
             'pnl_percent': round(pnl_percent, 2),
-            'duration': datetime.now() - pos['open_time'],
+            'duration': str(datetime.now() - datetime.fromisoformat(pos['open_time'])),
         }
 
         emoji = '✅' if net_pnl > 0 else '❌'
@@ -279,8 +310,9 @@ class RiskManager:
 
         # Cooldown başlat
         self.cooldown_remaining = COOLDOWN_CANDLES
-        self.last_exit_candle_ts = datetime.now()
+        self.last_exit_candle_ts = datetime.now().isoformat()
         self.active_position = None
+        self._save_state()
 
         return result
 
@@ -289,6 +321,7 @@ class RiskManager:
         if self.cooldown_remaining > 0:
             self.cooldown_remaining -= 1
             logger.info(f"⏳ Cooldown: {self.cooldown_remaining} mum kaldı")
+            self._save_state()
 
     def update_peak_balance(self, current_balance):
         """Zirve bakiyeyi günceller."""

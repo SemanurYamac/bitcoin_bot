@@ -1,0 +1,31 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+
+# Docker
+Dockerfile
+docker-compose.yml
+
+# Proje Özgü
+logs/*
+!logs/.gitkeep
+data/historical/*
+data/live_state/*
+*.db
+*.zip
+*.log

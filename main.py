@@ -25,8 +25,10 @@ from data.storage import DataStorage
 from analysis.indicators import TechnicalIndicators
 from strategy.signals import SignalGenerator
 from trading.risk_manager import RiskManager
+from trading.state_manager import StateManager
 from trading.executor import TradeExecutor
 from backtest.engine import BacktestEngine
+from backtest.hyperopt import HyperOptimizer
 from notifications.notifier import TelegramNotifier
 
 
@@ -143,12 +145,18 @@ def run_live_bot():
     usdt_balance = balance_info.get('USDT', {}).get('free', 0)
     logger.info(f"💰 Mevcut bakiye: {usdt_balance:.2f} USDT")
 
-    # Her coin için ayrı risk manager
-    risk_managers = {}
-    executor = TradeExecutor(collector, storage)
-
     # Hangi coinleri tarayacağız
     symbols = SYMBOLS if MULTI_COIN_MODE else [SYMBOL]
+
+    # Modüller ve State kurulumu
+    executor = TradeExecutor(collector, storage)
+    state_manager = StateManager()
+    
+    # Her coin için Risk Manager oluştur ve önceki durumları geri yükle
+    risk_managers = {}
+    for symbol in symbols:
+        per_coin_balance = usdt_balance / MAX_OPEN_POSITIONS
+        risk_managers[symbol] = RiskManager(symbol, per_coin_balance, state_manager)
 
     # Closed candle: her sembol için son işlenen mum timestamp'i
     last_processed_candle = {}  # {symbol: timestamp}
@@ -261,11 +269,7 @@ def run_live_bot():
                         })
                         continue
 
-                    # Risk manager oluştur (yoksa)
-                    if symbol not in risk_managers:
-                        per_coin_balance = usdt_balance / MAX_OPEN_POSITIONS
-                        risk_managers[symbol] = RiskManager(per_coin_balance)
-
+                    # Risk manager
                     rm = risk_managers[symbol]
 
                     # Yeni mum kapandığında cooldown azalt
@@ -531,10 +535,10 @@ def check_signal_now():
 def main():
     """Ana giriş noktası."""
     parser = argparse.ArgumentParser(description='Bitcoin & Altcoin Trading Bot')
-    parser.add_argument('--mode', choices=['backtest', 'paper', 'live', 'signal'],
+    parser.add_argument('--mode', choices=['backtest', 'paper', 'live', 'signal', 'hyperopt'],
                        default=None, help='Çalışma modu')
     parser.add_argument('--symbol', type=str, default=None,
-                       help='Tek coin backtesting (örn: ETH/USDT)')
+                       help='Tek coin backtesting/hyperopt (örn: BTC/USDT)')
     parser.add_argument('--start', type=str, default=None,
                        help='Backtest başlangıç tarihi (YYYY-MM-DD)')
     parser.add_argument('--end', type=str, default=None,
@@ -573,6 +577,27 @@ def main():
         )
         if results:
             print("\n✅ Backtesting tamamlandı!")
+
+    elif mode == 'hyperopt':
+        print("\n" + "=" * 70)
+        print("🔍 🚀 HYPEROPT BAŞLATILIYOR")
+        print("Geçmiş verilere göre en kârlı ayarlar aranıyor...")
+        print("=" * 70)
+        
+        hyper = HyperOptimizer(
+            symbol=args.symbol or SYMBOL,
+            start_date=args.start or BACKTEST_START_DATE,
+            end_date=args.end or BACKTEST_END_DATE,
+            initial_balance=args.balance or BACKTEST_INITIAL_BALANCE
+        )
+        
+        # Test edilecek senaryoların ızgarası (Grid)
+        param_grid = {
+            'rsi_oversold': [25, 30, 35],
+            'ema_long': [100, 200],
+            'buy_threshold': [3.0, 4.0, 5.0]
+        }
+        hyper.optimize(param_grid)
 
     elif mode == 'signal':
         check_signal_now()

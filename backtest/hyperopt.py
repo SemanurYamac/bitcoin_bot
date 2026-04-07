@@ -48,29 +48,28 @@ class HyperOptimizer:
             config.settings.BUY_THRESHOLD = params['buy_threshold']
             strategy.signals.BUY_THRESHOLD = params['buy_threshold']
 
-    def optimize(self, param_grid):
+    def optimize(self, scenarios):
         """
-        Parametre kombinasyonlarını oluşturur ve tek tek backtest'e sokar.
-        Örnek param_grid: {'rsi_oversold': [25, 30, 35], 'buy_threshold': [3.0, 4.0]}
+        Risk bazlı senaryo listesini alıp dener.
+        Örnek scenarios: [{'name': 'Safe', 'rsi_oversold': 25...}, {'name': 'Degen', ...}]
         """
-        keys = list(param_grid.keys())
-        values = list(param_grid.values())
-        permutations = list(itertools.product(*values))
-
         logger.info(f"📥 {self.symbol} için {self.start_date} -> {self.end_date} verisi çekiliyor...")
         collector = DataCollector()
-        df_raw = collector.fetch_historical_data(self.symbol, self.start_date, self.end_date)
+        df_raw = collector.fetch_historical_data(
+            symbol=self.symbol,
+            start_date=self.start_date,
+            end_date=self.end_date
+        )
 
         if df_raw.empty:
             logger.error("❌ Veri çekilemedi, optimizasyon iptal!")
             return None
 
-        logger.info(f"🤖 HyperOpt başlatılıyor... Toplam {len(permutations)} farklı senaryo test edilecek.\n")
+        logger.info(f"🤖 HyperOpt başlatılıyor... Toplam {len(scenarios)} farklı strateji profili test edilecek.\n")
 
         results = []
-        for index, combo in enumerate(permutations):
-            # Parametreleri set et
-            p = dict(zip(keys, combo))
+        for index, p in enumerate(scenarios):
+            profile_name = p.get('name', f"Senaryo {index+1}")
             self._patch_params(p)
 
             # İndikatörleri yeni ayarlarla baştan hesapla
@@ -82,7 +81,7 @@ class HyperOptimizer:
             res['params'] = p
             results.append(res)
 
-            logger.info(f"⚙️ Senaryo {index+1}/{len(permutations)} | Kâr: %{res['total_return_percent']:>+6.2f} | P: {p}")
+            logger.info(f"⚙️ [{profile_name}] | Kâr: %{res['total_return_percent']:>+6.2f} | P: {p}")
 
         # Optimizasyon Bitti - En iyi sonucu filtrele (Hiç işlem açamayanları ele)
         valid_results = [r for r in results if r['total_trades'] > 0]

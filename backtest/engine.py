@@ -42,8 +42,8 @@ class BacktestEngine:
         # Göstergeleri hesapla
         df = TechnicalIndicators.calculate_all(df)
 
-        # Risk yöneticisi
-        risk_manager = RiskManager(self.initial_balance)
+        # Risk yöneticisini test modu için oluştur (symbol olarak 'BACKTEST' veriyoruz)
+        risk_manager = RiskManager(symbol="BACKTEST", initial_balance=self.initial_balance)
         balance = self.initial_balance
         btc_holding = 0.0
 
@@ -116,7 +116,7 @@ class BacktestEngine:
                 if can_open:
                     # Pozisyon boyutunu hesapla
                     position = risk_manager.calculate_position_size(balance, current_price)
-                    amount = position['btc_amount']
+                    amount = position['coin_amount']
                     cost = position['usdt_amount']
                     fee = cost * 0.001  # %0.1 komisyon
 

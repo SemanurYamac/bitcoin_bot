@@ -580,24 +580,34 @@ def main():
 
     elif mode == 'hyperopt':
         print("\n" + "=" * 70)
-        print("🔍 🚀 HYPEROPT BAŞLATILIYOR")
-        print("Geçmiş verilere göre en kârlı ayarlar aranıyor...")
+        print("🔍 🚀 MULTI-COIN HYPEROPT BAŞLATILIYOR (3 YILLIK)")
+        print("Farklı Risk Profillerine Göre Optimizasyon Yapılıyor...")
         print("=" * 70)
         
-        hyper = HyperOptimizer(
-            symbol=args.symbol or SYMBOL,
-            start_date=args.start or BACKTEST_START_DATE,
-            end_date=args.end or BACKTEST_END_DATE,
-            initial_balance=args.balance or BACKTEST_INITIAL_BALANCE
-        )
-        
-        # Test edilecek senaryoların ızgarası (Grid)
-        param_grid = {
-            'rsi_oversold': [25, 30, 35],
-            'ema_long': [100, 200],
-            'buy_threshold': [3.0, 4.0, 5.0]
-        }
-        hyper.optimize(param_grid)
+        # Faz 3: Hata Paylarını Kademeli Artıran Risk Senaryoları
+        scenarios = [
+            {'name': 'Safe (Muhafazakar)', 'rsi_oversold': 25, 'ema_long': 200, 'buy_threshold': 4.0},
+            {'name': 'Moderate (Dengeli)', 'rsi_oversold': 30, 'ema_long': 100, 'buy_threshold': 3.0},
+            {'name': 'Risky (Agresif)',    'rsi_oversold': 35, 'ema_long': 50,  'buy_threshold': 2.0},
+            {'name': 'Degen (Maksimum)',   'rsi_oversold': 40, 'ema_long': 20,  'buy_threshold': 1.0}
+        ]
+
+        symbols_to_test = SYMBOLS if MULTI_COIN_MODE else [SYMBOL]
+        if args.symbol:
+            symbols_to_test = [args.symbol]
+
+        for sym in symbols_to_test:
+            print(f"\n" + "-" * 50)
+            print(f"🪙 {sym} İÇİN TARAMA BAŞLIYOR...")
+            print("-" * 50)
+
+            hyper = HyperOptimizer(
+                symbol=sym,
+                start_date=args.start or '2023-04-01',  # 3 Yıl öncesi
+                end_date=args.end or BACKTEST_END_DATE,
+                initial_balance=args.balance or BACKTEST_INITIAL_BALANCE
+            )
+            hyper.optimize(scenarios)
 
     elif mode == 'signal':
         check_signal_now()

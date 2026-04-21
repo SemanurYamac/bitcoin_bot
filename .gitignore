@@ -38,3 +38,4 @@ logs/
 data/historical/*.db
 __pycache__/
 *.zip
+data/live_state/

@@ -387,11 +387,17 @@ def run_live_bot():
 
                     # ─── Fail-Safe ─────────────────────────────
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                        logger.error(f"🛡️ FAIL-SAFE: {consecutive_errors} ardışık hata! {FAILSAFE_WAIT_SECONDS}s bekleniyor.")
-                        notifier.send_error(
-                            f"Fail-safe aktif: {consecutive_errors} ardışık hata.\n"
-                            f"{FAILSAFE_WAIT_SECONDS}s bekleniyor."
-                        )
+                        # Ayni fail-safe mesajini tekrar tekrar loga yazma (spam engeli)
+                        if not hasattr(run_live_bot, '_last_fs') or run_live_bot._last_fs != consecutive_errors:
+                            logger.error(
+                                f"FAIL-SAFE: {consecutive_errors} ardisik hata! "
+                                f"{FAILSAFE_WAIT_SECONDS}s bekleniyor."
+                            )
+                            notifier.send_error(
+                                f"Fail-safe aktif: {consecutive_errors} ardisik hata.\n"
+                                f"{FAILSAFE_WAIT_SECONDS}s bekleniyor."
+                            )
+                            run_live_bot._last_fs = consecutive_errors
                         time.sleep(FAILSAFE_WAIT_SECONDS)
                         consecutive_errors = 0
                     continue
@@ -532,10 +538,112 @@ def check_signal_now():
     print("=" * 70)
 
 
+def check_status():
+    """
+    Anlık portföy durumunu terminale yazar.
+    Bakiye, açık pozisyonlar ve gerçek zamanlı PnL tablosu.
+    Kullanım: python main.py --mode status
+    """
+    from datetime import datetime
+    from trading.state_manager import StateManager
+
+    # Windows konsolunda UTF-8 zorla (emoji + unicode karakterler icin)
+    import io
+    if hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+    print()
+    print("═" * 62)
+    print("  💼  CANLI PORTFÖY DURUM PANELİ")
+    print(f"  🕐  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("═" * 62)
+
+    # ─── Bakiye ──────────────────────────────────────────────────
+    try:
+        collector = DataCollector(use_testnet=True)
+        balance_raw = collector.fetch_balance()
+
+        usdt_free  = balance_raw.get('USDT', {}).get('free',  0.0)
+        usdt_used  = balance_raw.get('USDT', {}).get('used',  0.0)
+        usdt_total = balance_raw.get('USDT', {}).get('total', 0.0)
+
+        print()
+        print("  💰  BAKİYE (Testnet USDT)")
+        print(f"      Kullanılabilir : ${usdt_free:>12,.2f}")
+        print(f"      Pozisyonda     : ${usdt_used:>12,.2f}")
+        print(f"      TOPLAM         : ${usdt_total:>12,.2f}")
+    except Exception as e:
+        print(f"  ❌  Bakiye alınamadı: {e}")
+        usdt_total = 0.0
+
+    # ─── Açık Pozisyonlar (State Manager'dan) ───────────────────
+    print()
+    print("  📌  AÇIK POZİSYONLAR")
+    print("  " + "─" * 58)
+
+    state_manager = StateManager()
+    symbols = SYMBOLS if MULTI_COIN_MODE else [SYMBOL]
+    total_open_positions = 0
+    total_unrealized_pnl = 0.0
+
+    for sym in symbols:
+        coin_state = state_manager.get_coin_state(sym)
+        if not coin_state:
+            continue
+        pos = coin_state.get('active_position')
+        if not pos:
+            continue
+
+        total_open_positions += 1
+        entry  = pos.get('entry_price', 0)
+        amount = pos.get('amount', 0)
+        sl     = pos.get('stop_loss', 0)
+        tp     = pos.get('take_profit', 0)
+        opened = pos.get('open_time', 'Bilinmiyor')
+
+        # Anlık fiyat çek
+        try:
+            ticker = collector.fetch_ticker(sym)
+            current = ticker['last']
+        except Exception:
+            current = entry  # hata olursa giriş fiyatını kullan
+
+        # Gerçek zamanlı kâr/zarar
+        pnl_usd = (current - entry) * amount
+        pnl_pct = (current - entry) / entry * 100 if entry else 0
+        total_unrealized_pnl += pnl_usd
+
+        pnl_arrow = "📈" if pnl_usd >= 0 else "📉"
+        print()
+        print(f"  🪙  {sym}")
+        print(f"      Giriş          : ${entry:>10,.2f}")
+        print(f"      Anlık Fiyat    : ${current:>10,.2f}")
+        print(f"      Miktar         : {amount:.8f}")
+        print(f"      Stop-Loss      : ${sl:>10,.2f}")
+        print(f"      Take-Profit    : ${tp:>10,.2f}")
+        print(f"      Açılış         : {opened[:19]}")
+        print(f"      Gerçek. PnL    : {pnl_arrow} ${pnl_usd:>+,.2f}  ({pnl_pct:+.2f}%)")
+
+    if total_open_positions == 0:
+        print("  ⚪  Şu an açık pozisyon yok.")
+
+    # ─── Özet ─────────────────────────────────────────────────────
+    print()
+    print("  " + "─" * 58)
+    print()
+    net_total = usdt_total + total_unrealized_pnl
+    pnl_emoji = "🟢" if total_unrealized_pnl >= 0 else "🔴"
+    print(f"  {pnl_emoji}  Gerçekleşmemiş PnL  : ${total_unrealized_pnl:>+,.2f}")
+    print(f"      Net Portföy Değeri  : ${net_total:>12,.2f} USDT")
+    print()
+    print("═" * 62)
+    print()
+
+
 def main():
     """Ana giriş noktası."""
     parser = argparse.ArgumentParser(description='Bitcoin & Altcoin Trading Bot')
-    parser.add_argument('--mode', choices=['backtest', 'paper', 'live', 'signal', 'hyperopt'],
+    parser.add_argument('--mode', choices=['backtest', 'paper', 'live', 'signal', 'hyperopt', 'status'],
                        default=None, help='Çalışma modu')
     parser.add_argument('--symbol', type=str, default=None,
                        help='Tek coin backtesting/hyperopt (örn: BTC/USDT)')
@@ -611,6 +719,9 @@ def main():
 
     elif mode == 'signal':
         check_signal_now()
+
+    elif mode == 'status':
+        check_status()
 
     elif mode in ('paper', 'live'):
         if mode == 'live':

@@ -17,6 +17,10 @@ from config.settings import (
     SYMBOL, TIMEFRAME, TRADING_MODE
 )
 
+# ─── Retry / Backoff Yardımcısı ───────────────────────────────────────────
+RETRY_DELAYS = [1, 2, 5, 10]  # saniye: 1. deneme sonrası bekleme süresi
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,6 +66,7 @@ class DataCollector:
         """
         OHLCV (mum) verilerini GERÇEK Binance'den çeker.
         Testnet sınırlı veri döndüğü için her zaman gerçek API kullanılır.
+        Ağ hatalarında otomatik retry + exponential backoff uygular.
 
         Args:
             symbol: İşlem çifti (varsayılan: BTC/USDT)
@@ -74,28 +79,55 @@ class DataCollector:
         """
         symbol = symbol or SYMBOL
         timeframe = timeframe or TIMEFRAME
+        last_exc = None
 
-        try:
-            # Gerçek Binance'den veri çek (testnet değil!)
-            ohlcv = self.public_exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+        for attempt, delay in enumerate(RETRY_DELAYS + [None], start=1):
+            try:
+                ohlcv = self.public_exchange.fetch_ohlcv(
+                    symbol, timeframe, since=since, limit=limit
+                )
 
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            df = df.astype(float)
+                df = pd.DataFrame(
+                    ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+                )
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                df = df.astype(float)
 
-            logger.info(f"✅ {len(df)} mum verisi çekildi: {symbol} ({timeframe})")
-            return df
+                if attempt > 1:
+                    logger.info(f"✅ {symbol} {attempt}. denemede başarılı.")
+                else:
+                    logger.info(f"✅ {len(df)} mum verisi çekildi: {symbol} ({timeframe})")
+                return df
 
-        except ccxt.NetworkError as e:
-            logger.error(f"❌ Ağ hatası: {e}")
-            raise
-        except ccxt.ExchangeError as e:
-            logger.error(f"❌ Borsa hatası: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"❌ Beklenmeyen hata: {e}")
-            raise
+            except (ccxt.NetworkError, ccxt.RequestTimeout) as e:
+                last_exc = e
+                if delay is not None:
+                    logger.warning(
+                        f"⚠️ {symbol} ağ hatası (deneme {attempt}/{len(RETRY_DELAYS)}), "
+                        f"{delay}s bekleniyor... [{type(e).__name__}]"
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(f"❌ {symbol} tüm retry denemeleri başarısız: {e}")
+                    raise
+
+            except ccxt.RateLimitExceeded as e:
+                last_exc = e
+                wait = (delay or 30) * 3  # Rate limit için 3x bekleme
+                logger.warning(f"⚠️ Rate limit! {wait}s bekleniyor...")
+                time.sleep(wait)
+                if delay is None:
+                    raise
+
+            except ccxt.ExchangeError as e:
+                logger.error(f"❌ Borsa hatası: {e}")
+                raise
+            except Exception as e:
+                logger.error(f"❌ Beklenmeyen hata (fetch_ohlcv): {e}")
+                raise
+
+        raise last_exc
 
     def fetch_historical_data(self, symbol=None, timeframe=None,
                                start_date='2022-04-01', end_date=None):
@@ -163,22 +195,35 @@ class DataCollector:
         return df
 
     def fetch_ticker(self, symbol=None):
-        """Anlık fiyat bilgisi çeker (gerçek Binance'den)."""
+        """Anlık fiyat bilgisi çeker (gerçek Binance'den). Retry ile dayanıklı."""
         symbol = symbol or SYMBOL
-        try:
-            ticker = self.public_exchange.fetch_ticker(symbol)
-            return {
-                'symbol': symbol,
-                'last': ticker['last'],
-                'bid': ticker['bid'],
-                'ask': ticker['ask'],
-                'volume': ticker['baseVolume'],
-                'change_24h': ticker['percentage'],
-                'timestamp': datetime.now()
-            }
-        except Exception as e:
-            logger.error(f"❌ Ticker çekme hatası: {e}")
-            raise
+        last_exc = None
+
+        for attempt, delay in enumerate(RETRY_DELAYS[:2] + [None], start=1):
+            try:
+                ticker = self.public_exchange.fetch_ticker(symbol)
+                return {
+                    'symbol': symbol,
+                    'last': ticker['last'],
+                    'bid': ticker['bid'],
+                    'ask': ticker['ask'],
+                    'volume': ticker['baseVolume'],
+                    'change_24h': ticker['percentage'],
+                    'timestamp': datetime.now()
+                }
+            except (ccxt.NetworkError, ccxt.RequestTimeout) as e:
+                last_exc = e
+                if delay is not None:
+                    logger.warning(f"⚠️ Ticker hatası ({symbol}), {delay}s retry...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"❌ Ticker {symbol} tüm denemeler başarısız.")
+                    raise
+            except Exception as e:
+                logger.error(f"❌ Ticker çekme hatası: {e}")
+                raise
+
+        raise last_exc
 
     def fetch_balance(self):
         """Hesap bakiyesini çeker (testnet/live exchange üzerinden)."""

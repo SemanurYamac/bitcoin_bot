@@ -8,7 +8,9 @@ from config.settings import (
     RISK_PER_TRADE, MAX_POSITION_PERCENT, MAX_PORTFOLIO_EXPOSURE,
     STOP_LOSS_PERCENT, TAKE_PROFIT_PERCENT,
     MAX_DRAWDOWN_PERCENT, TRAILING_STOP_PERCENT, TRAILING_ACTIVATION,
-    MAX_DAILY_TRADES, COOLDOWN_CANDLES
+    MAX_DAILY_TRADES, COOLDOWN_CANDLES,
+    PARTIAL_TP_ENABLED, PARTIAL_TP_R_MULTIPLE,
+    PARTIAL_TP_CLOSE_PERCENT, PARTIAL_TP_MOVE_SL_TO_BE
 )
 
 logger = logging.getLogger(__name__)
@@ -185,6 +187,18 @@ class RiskManager:
 
         take_profit = self.calculate_take_profit(entry_price, side)
 
+        # ─── Partial TP Fiyatını Hesapla ───────────────────────────
+        # 1R = giriş - stop_loss (risk mesafesi)
+        # Partial TP = giriş + (R_MULTIPLE × 1R)
+        if side == 'buy':
+            risk_per_unit = sl - entry_price   # negatif olarak tutuyoruz → aşağıda abs
+            # Gerçek risk: entry - sl, partial_tp = entry + multiple * (entry - sl)
+            one_r = entry_price - sl
+            partial_tp_price = round(entry_price + PARTIAL_TP_R_MULTIPLE * one_r, 2)
+        else:
+            one_r = sl - entry_price
+            partial_tp_price = round(entry_price - PARTIAL_TP_R_MULTIPLE * one_r, 2)
+
         self.active_position = {
             'side': side,
             'entry_price': entry_price,
@@ -196,6 +210,9 @@ class RiskManager:
             'highest_price': entry_price if side == 'buy' else None,
             'lowest_price': entry_price if side == 'sell' else None,
             'open_time': (open_time or datetime.now()).isoformat(),
+            # Partial TP alanları
+            'partial_tp_price': partial_tp_price,
+            'partial_tp_triggered': False,
         }
 
         self.daily_trades += 1
@@ -206,11 +223,143 @@ class RiskManager:
             f"Giriş: ${entry_price:,.2f} | "
             f"Miktar: {amount:.8f} | "
             f"Stop-Loss: ${sl:,.2f} | "
-            f"Take-Profit: ${take_profit:,.2f}"
+            f"Take-Profit: ${take_profit:,.2f} | "
+            f"Partial TP ({PARTIAL_TP_R_MULTIPLE}R): ${partial_tp_price:,.2f}"
         )
 
         self._save_state()
         return self.active_position
+
+    def check_partial_tp(self, current_price) -> tuple:
+        """
+        Kısmi kâr alma (Partial Take-Profit) koşulunu kontrol eder.
+
+        Partial TP şartları:
+          - PARTIAL_TP_ENABLED = True olmalı
+          - Pozisyon açık olmalı
+          - Partial TP daha önce tetiklenmemiş olmalı
+          - Fiyat partial_tp_price'a ulaşmış olmalı
+
+        Returns:
+            (bool, str): (tetiklenmeli_mi, neden)
+        """
+        if not PARTIAL_TP_ENABLED:
+            return False, ""
+
+        if self.active_position is None:
+            return False, ""
+
+        pos = self.active_position
+
+        # Zaten tetiklendiyse bir daha tetikleme
+        if pos.get('partial_tp_triggered', False):
+            return False, ""
+
+        partial_tp_price = pos.get('partial_tp_price')
+        if partial_tp_price is None:
+            return False, ""
+
+        side = pos['side']
+        if side == 'buy' and current_price >= partial_tp_price:
+            return True, (
+                f"Partial TP tetiklendi ({PARTIAL_TP_R_MULTIPLE}R @ "
+                f"${partial_tp_price:,.2f}) — "
+                f"%{PARTIAL_TP_CLOSE_PERCENT*100:.0f} kapatılıyor"
+            )
+        elif side == 'sell' and current_price <= partial_tp_price:
+            return True, (
+                f"Partial TP tetiklendi ({PARTIAL_TP_R_MULTIPLE}R @ "
+                f"${partial_tp_price:,.2f}) — "
+                f"%{PARTIAL_TP_CLOSE_PERCENT*100:.0f} kapatılıyor"
+            )
+
+        return False, ""
+
+    def execute_partial_close(self, exit_price: float) -> dict:
+        """
+        Pozisyonun PARTIAL_TP_CLOSE_PERCENT'ini kapatır.
+
+        İşlem adımları:
+          1. Kapatılacak ve kalacak miktarları hesapla
+          2. Kapatılan kısım için PnL hesapla (komisyon dahil)
+          3. Pozisyon miktarını kalan miktar ile güncelle
+          4. partial_tp_triggered = True olarak işaretle
+          5. PARTIAL_TP_MOVE_SL_TO_BE = True ise SL → breakeven
+          6. State'i diske kaydet
+
+        Args:
+            exit_price: Gerçekleşen satış fiyatı
+
+        Returns:
+            dict: Kısmi kapanış sonuç bilgisi
+        """
+        if self.active_position is None:
+            logger.error("execute_partial_close: Açık pozisyon yok!")
+            return {}
+
+        pos = self.active_position
+        entry_price = pos['entry_price']
+        total_amount = pos['amount']
+        side = pos['side']
+
+        close_amount = total_amount * PARTIAL_TP_CLOSE_PERCENT
+        remaining_amount = total_amount * (1 - PARTIAL_TP_CLOSE_PERCENT)
+
+        # Kısmi kâr/zarar hesabı
+        if side == 'buy':
+            gross_pnl = (exit_price - entry_price) * close_amount
+            pnl_percent = (exit_price - entry_price) / entry_price * 100
+        else:
+            gross_pnl = (entry_price - exit_price) * close_amount
+            pnl_percent = (entry_price - exit_price) / entry_price * 100
+
+        # Komisyon: %0.1 alış + %0.1 satış
+        fee = (entry_price * close_amount * 0.001) + (exit_price * close_amount * 0.001)
+        net_pnl = gross_pnl - fee
+
+        result = {
+            'side': 'partial_sell',
+            'symbol': None,           # Çağıran tarafından doldurulur
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'partial_tp_price': pos.get('partial_tp_price'),
+            'r_multiple': PARTIAL_TP_R_MULTIPLE,
+            'close_percent': PARTIAL_TP_CLOSE_PERCENT,
+            'close_amount': round(close_amount, 8),
+            'remaining_amount': round(remaining_amount, 8),
+            'gross_pnl': round(gross_pnl, 2),
+            'fee': round(fee, 4),
+            'net_pnl': round(net_pnl, 2),
+            'pnl_percent': round(pnl_percent, 2),
+        }
+
+        # ─────────────────────────────────────────────────────────
+        # Pozisyon Durumunu Güncelle
+        # ─────────────────────────────────────────────────────────
+        pos['amount'] = round(remaining_amount, 8)
+        pos['partial_tp_triggered'] = True
+
+        old_sl = pos['stop_loss']
+
+        # SL breakeven'a çek (kalan %50 için sıfır risk)
+        if PARTIAL_TP_MOVE_SL_TO_BE:
+            pos['stop_loss'] = round(entry_price, 8)
+            logger.info(
+                f"🔒 [{side.upper()}] SL breakeven'a taşındı: "
+                f"${old_sl:,.2f} → ${pos['stop_loss']:,.2f}"
+            )
+
+        self._save_state()
+
+        logger.info(
+            f"💰 PARTIAL TP | "
+            f"Giriş: ${entry_price:,.2f} → Çıkış: ${exit_price:,.2f} | "
+            f"Kapatılan: {close_amount:.8f} (%{PARTIAL_TP_CLOSE_PERCENT*100:.0f}) | "
+            f"Kalan: {remaining_amount:.8f} | "
+            f"Net PnL: ${net_pnl:+,.2f} ({pnl_percent:+.2f}%)"
+        )
+
+        return result
 
     def check_exit_conditions(self, current_price):
         """

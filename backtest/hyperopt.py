@@ -31,22 +31,23 @@ class HyperOptimizer:
 
     def _patch_params(self, params):
         """Dinamik olarak test edilecek ayarları global config dosyalarına enjekte eder."""
-        if 'rsi_oversold' in params:
-            config.settings.RSI_OVERSOLD = params['rsi_oversold']
-            analysis.indicators.RSI_OVERSOLD = params['rsi_oversold']
-        if 'rsi_overbought' in params:
-            config.settings.RSI_OVERBOUGHT = params['rsi_overbought']
-            analysis.indicators.RSI_OVERBOUGHT = params['rsi_overbought']
-        if 'ema_short' in params:
-            config.settings.EMA_SHORT = params['ema_short']
-            analysis.indicators.EMA_SHORT = params['ema_short']
-        if 'ema_long' in params:
-            config.settings.EMA_LONG = params['ema_long']
-            analysis.indicators.EMA_LONG = params['ema_long']
-            strategy.signals.EMA_LONG = params['ema_long']
+        import backtest.engine
+        
+        if 'adx_threshold' in params:
+            config.settings.ADX_THRESHOLD = params['adx_threshold']
+            strategy.signals.ADX_THRESHOLD = params['adx_threshold']
         if 'buy_threshold' in params:
             config.settings.BUY_THRESHOLD = params['buy_threshold']
             strategy.signals.BUY_THRESHOLD = params['buy_threshold']
+        if 'atr_sl_mult' in params:
+            config.settings.ATR_SL_MULT = params['atr_sl_mult']
+            backtest.engine.ATR_SL_MULT = params['atr_sl_mult']
+        if 'atr_tp1_mult' in params:
+            config.settings.ATR_TP1_MULT = params['atr_tp1_mult']
+            backtest.engine.ATR_TP1_MULT = params['atr_tp1_mult']
+        if 'atr_tp2_mult' in params:
+            config.settings.ATR_TP2_MULT = params['atr_tp2_mult']
+            backtest.engine.ATR_TP2_MULT = params['atr_tp2_mult']
 
     def optimize(self, scenarios):
         """

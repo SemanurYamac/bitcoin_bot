@@ -18,7 +18,7 @@ from config.settings import (
     LOG_FILE, LOG_LEVEL, MULTI_COIN_MODE, MIN_VOLUME_24H, MAX_OPEN_POSITIONS,
     SCAN_INTERVAL_MINUTES, POSITION_CHECK_INTERVAL,
     CLOSED_CANDLE_MODE, MAX_CONSECUTIVE_ERRORS, FAILSAFE_WAIT_SECONDS,
-    MAX_PORTFOLIO_EXPOSURE
+    MAX_PORTFOLIO_EXPOSURE, PARTIAL_TP_CLOSE_PERCENT, RISK_PER_TRADE
 )
 from data.collector import DataCollector
 from data.storage import DataStorage
@@ -278,6 +278,35 @@ def run_live_bot():
 
                     # ─── Aktif Pozisyon Kontrolü ────────────────
                     if rm.active_position is not None:
+                        # ─── 1) Önce Partial TP Kontrolü ──────────────────────
+                        # Tam exit'ten önce partial TP bakılır.
+                        # Partial TP tetiklendiğinde pozisyon KAPANMAZ,
+                        # sadece kapatılan kısım satılır, kalan devam eder.
+                        should_partial, partial_reason = rm.check_partial_tp(current_price)
+
+                        if should_partial:
+                            pos = rm.active_position
+                            partial_sell_result = executor.execute_sell(
+                                symbol=symbol,
+                                amount=pos['amount'] * PARTIAL_TP_CLOSE_PERCENT,
+                                price=None
+                            )
+
+                            if partial_sell_result:
+                                partial_close = rm.execute_partial_close(
+                                    partial_sell_result.get('price', current_price)
+                                )
+                                if partial_close:
+                                    partial_close['symbol'] = symbol
+                                    notifier.send_partial_tp(partial_close)
+                                    logger.info(
+                                        f"🎯 {symbol} Partial TP tamamlandı: {partial_reason} | "
+                                        f"Net PnL: ${partial_close.get('net_pnl', 0):+,.2f}"
+                                    )
+                            else:
+                                logger.error(f"❌ {symbol} Partial TP satış emri başarısız!")
+
+                        # ─── 2) Tam Exit Kontrolü ─────────────────────────
                         should_exit, exit_reason = rm.check_exit_conditions(current_price)
 
                         if should_exit:
@@ -429,6 +458,31 @@ def run_live_bot():
                         try:
                             ticker = collector.fetch_ticker(sym)
                             current_price = ticker['last']
+
+                            # ─── 1) Periyodik Partial TP Kontrolü ────────────────
+                            should_partial, partial_reason = rm.check_partial_tp(current_price)
+                            if should_partial:
+                                pos = rm.active_position
+                                partial_sell_result = executor.execute_sell(
+                                    symbol=sym,
+                                    amount=pos['amount'] * PARTIAL_TP_CLOSE_PERCENT,
+                                    price=None
+                                )
+                                if partial_sell_result:
+                                    partial_close = rm.execute_partial_close(
+                                        partial_sell_result.get('price', current_price)
+                                    )
+                                    if partial_close:
+                                        partial_close['symbol'] = sym
+                                        notifier.send_partial_tp(partial_close)
+                                        logger.info(
+                                            f"🎯 {sym} Periyodik Partial TP: {partial_reason} | "
+                                            f"Net PnL: ${partial_close.get('net_pnl', 0):+,.2f}"
+                                        )
+                                else:
+                                    logger.error(f"❌ {sym} Periyodik Partial TP satış emri başarısız!")
+
+                            # ─── 2) Periyodik Tam Exit Kontrolü ────────────────
                             should_exit, exit_reason = rm.check_exit_conditions(current_price)
 
                             if should_exit:
@@ -560,7 +614,9 @@ def check_status():
 
     # ─── Bakiye ──────────────────────────────────────────────────
     try:
-        collector = DataCollector(use_testnet=True)
+        import os
+        is_paper = (os.getenv('TRADING_MODE', 'live') == 'paper')
+        collector = DataCollector(use_testnet=is_paper)
         balance_raw = collector.fetch_balance()
 
         usdt_free  = balance_raw.get('USDT', {}).get('free',  0.0)
@@ -568,7 +624,7 @@ def check_status():
         usdt_total = balance_raw.get('USDT', {}).get('total', 0.0)
 
         print()
-        print("  💰  BAKİYE (Testnet USDT)")
+        print("  💰  BAKİYE (USDT)")
         print(f"      Kullanılabilir : ${usdt_free:>12,.2f}")
         print(f"      Pozisyonda     : ${usdt_used:>12,.2f}")
         print(f"      TOPLAM         : ${usdt_total:>12,.2f}")
@@ -672,7 +728,7 @@ def main():
     logger.info(f"   Zaman Dilimi: {TIMEFRAME}")
     logger.info(f"   Closed Candle: {CLOSED_CANDLE_MODE}")
     logger.info(f"   Rejim Filtresi: AÇIK")
-    logger.info(f"   Risk/Trade: 1%")
+    logger.info(f"   Risk/Trade: {int(RISK_PER_TRADE*100)}%")
     logger.info("=" * 50)
 
     if mode == 'backtest':
@@ -692,13 +748,25 @@ def main():
         print("Farklı Risk Profillerine Göre Optimizasyon Yapılıyor...")
         print("=" * 70)
         
-        # Faz 3: Hata Paylarını Kademeli Artıran Risk Senaryoları
-        scenarios = [
-            {'name': 'Safe (Muhafazakar)', 'rsi_oversold': 25, 'ema_long': 200, 'buy_threshold': 4.0},
-            {'name': 'Moderate (Dengeli)', 'rsi_oversold': 30, 'ema_long': 100, 'buy_threshold': 3.0},
-            {'name': 'Risky (Agresif)',    'rsi_oversold': 35, 'ema_long': 50,  'buy_threshold': 2.0},
-            {'name': 'Degen (Maksimum)',   'rsi_oversold': 40, 'ema_long': 20,  'buy_threshold': 1.0}
-        ]
+        import itertools
+        adx_values = [20, 25, 28]              # Trend eşikleri
+        buy_values = [5.5, 6.0, 6.5, 7.0]      # Alım eşikleri
+        sl_values  = [1.0, 1.5, 2.0]           # Stop Loss ATR
+        tp2_values = [2.0, 3.0, 4.0]           # Hedef ATR
+
+        scenarios = []
+        for index, (adx, buy, sl, tp2) in enumerate(itertools.product(adx_values, buy_values, sl_values, tp2_values)):
+            tp1 = sl + 0.5 # TP1'i SL'in uzeine koy
+            if tp2 <= tp1 + 0.1: # Mantiksiz kombinasyonlari geç
+                continue
+            scenarios.append({
+                'name': f'Opt_{index}',
+                'adx_threshold': adx,
+                'buy_threshold': buy,
+                'atr_sl_mult': sl,
+                'atr_tp1_mult': tp1,
+                'atr_tp2_mult': tp2
+            })
 
         symbols_to_test = SYMBOLS if MULTI_COIN_MODE else [SYMBOL]
         if args.symbol:
@@ -727,11 +795,8 @@ def main():
         if mode == 'live':
             print("\n⚠️  DİKKAT: CANLI MOD!")
             print("    Gerçek para ile işlem yapılacaktır!")
-            confirm = input("    Devam etmek istiyor musunuz? (evet/hayır): ")
-            if confirm.lower() not in ('evet', 'e', 'yes', 'y'):
-                print("İptal edildi.")
-                return
-
+            print("    Arka plan servisi olduğu için otomatik devam ediliyor...")
+        
         run_live_bot()
 
     else:

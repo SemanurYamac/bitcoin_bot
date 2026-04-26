@@ -1,214 +1,293 @@
 """
-Bitcoin Trading Bot - Sinyal Üretici (Faz 1)
-Rejim filtresi, closed candle desteği, score breakdown, config-driven ağırlıklar.
+Bitcoin Trading Bot - Sinyal Üretici (Faz 5 — Momentum Rider)
+
+Strateji: EMA Hizalama + ADX Trend Filtresi + RSI Zone + Hacim Onayı
+
+Giriş Mantığı (TÜMÜ sağlanmalı):
+  1. ADX > 25 → Güçlü trend var (en kritik filtre)
+  2. EMA9 > EMA21 → Momentum yukarı döndü
+  3. Fiyat > EMA50 → Orta vade trend yukarı
+  4. RSI 40-65 zonu → Ne aşırı alım ne aşırı satım
+  5. MACD bullish → Momentum teyidi
+  6. Volume > 1.2× MA → Hacim onayı (sahte breakout önleme)
+
+Çıkış Mantığı:
+  - SL: ATR × 1.5 (dinamik, volatiliteye göre)  
+  - TP1: ATR × 2.0 @ %40 pozisyon (hızlı kâr kilitleme)
+  - TP2: ATR × 3.0 @ %60 kalan (trailing stop ile)
+
+Neden işe yarar:
+  - ADX filtresi sideways piyasada işlemi engeller (en büyük kayıp kaynağı)
+  - EMA hizalama momentum onayı sağlar
+  - RSI 40-65 zone: Ne aşırı yükseliş ne dip (orta enerji = sürdürülebilir)
+  - 3:1 R:R hedefi matematiği karlı yapar:
+    E = (0.45 × 3R) - (0.55 × 1R) = +0.80R per trade
 """
 import logging
+import pandas as pd
 from analysis.indicators import TechnicalIndicators
 from config.settings import (
-    SIGNAL_WEIGHTS, BUY_THRESHOLD, SELL_THRESHOLD,
-    REGIME_FILTER_MULTIPLIER, EMA_LONG
+    BUY_THRESHOLD, SELL_THRESHOLD,
+    REGIME_FILTER_MULTIPLIER, EMA_TREND,
+    ADX_THRESHOLD,
+    RSI_LONG_MIN, RSI_LONG_MAX,
+    RSI_SHORT_MIN, RSI_SHORT_MAX,
 )
 
 logger = logging.getLogger(__name__)
 
+# Backwards compat
+EMA_LONG = EMA_TREND
+
 
 class SignalGenerator:
     """
-    Çoklu gösterge stratejisi ile AL/SAT sinyalleri üretir.
-    Rejim filtresi: EMA200 altında long threshold artırılır.
+    Momentum Rider sinyal sistemi.
+    ADX + EMA Hizalama + RSI Zone + Hacim = Yüksek olasılıklı kurulum.
     """
 
     def generate_signal(self, df, index=-1):
         """
-        Tüm göstergeleri değerlendirerek sinyal üretir.
+        Momentum Rider sinyal üretimi.
 
-        Args:
-            df: Göstergeler eklenmiş DataFrame
-            index: Değerlendirilecek satır indeksi (-1 = son kapanmış mum)
+        Puanlama sistemi (max +10 BUY, min -10 SELL):
+          ADX Filtresi  : Geçmezse işlem yok (hard gate)
+          EMA Hizalama  : +3.0 / -3.0 (en ağırlıklı)
+          MACD          : +2.0 / -2.0
+          RSI Zone      : +2.0 / -2.0
+          Volume Onayı  : +1.5 / -1.5
+          EMA200 Rejim  : +1.5 / -1.5 (genel yön)
 
         Returns:
-            dict: {signal, score, reasons, details, score_breakdown}
+            dict: {signal, score, reasons, details, adx_value}
         """
         summary = TechnicalIndicators.get_summary(df, index)
         if summary is None:
-            return {
-                'signal': 'HOLD', 'score': 0,
-                'reasons': ['Yetersiz veri'],
-                'details': {}, 'score_breakdown': {}
-            }
+            return self._hold('Yetersiz veri')
 
-        score = 0
-        reasons = []
-        details = {}
-        score_breakdown = {}  # Her göstergenin puan kırılımı
+        score    = 0.0
+        reasons  = []
+        details  = {}
+        breakdown = {}
 
-        # ─── RSI Değerlendirmesi ───────────────────────────────
-        rsi_signal = summary['rsi_signal']
-        rsi_val = summary['rsi']
-        details['rsi'] = {'value': rsi_val, 'signal': rsi_signal}
+        price      = summary['price']
+        atr        = summary.get('atr', 0)
+        adx_val    = summary.get('adx', 0)
+        adx_signal = summary.get('adx_signal', 'sideways')
 
-        if rsi_signal == 'oversold':
-            rsi_score = SIGNAL_WEIGHTS['rsi']
-            reasons.append(f"RSI aşırı satım ({rsi_val:.1f})")
-        elif rsi_signal == 'overbought':
-            rsi_score = -SIGNAL_WEIGHTS['rsi']
-            reasons.append(f"RSI aşırı alım ({rsi_val:.1f})")
-        elif rsi_val < 45:
-            rsi_score = SIGNAL_WEIGHTS['rsi'] * 0.3
-        elif rsi_val > 55:
-            rsi_score = -SIGNAL_WEIGHTS['rsi'] * 0.3
+        # ═══════════════════════════════════════════════════════
+        # HARD GATE 1: ADX Filtresi
+        # Sideways piyasada EN BÜYÜK kayıp kaynağı trend-following
+        # ADX < eşik → hiç işlem yapma
+        # ═══════════════════════════════════════════════════════
+        if pd.isna(adx_val) or adx_val < ADX_THRESHOLD:
+            regime = 'SIDEWAYS' if not pd.isna(adx_val) else 'HESAPLANAMADI'
+            return self._hold(
+                f"ADX={adx_val:.1f} < {ADX_THRESHOLD} → {regime} piyasa, işlem yok",
+                adx=adx_val
+            )
+
+        # ADX yönü — bull trend mi bear trend mi?
+        is_adx_bull = adx_signal == 'strong_bull'
+        is_adx_bear = adx_signal == 'strong_bear'
+        breakdown['ADX'] = f"ADX={adx_val:.1f} → {adx_signal}"
+
+        # ═══════════════════════════════════════════════════════
+        # HARD GATE 2: EMA200 Rejim Filtresi
+        # Genel piyasa yönü yukarı ise → sadece LONG
+        # Genel piyasa yönü aşağı ise → BUY sinyallerini sert filtrele
+        # ═══════════════════════════════════════════════════════
+        ema_trend_val = summary.get('ema_long')
+        is_above_trend = price > ema_trend_val if ema_trend_val else True
+        buy_multiplier = 1.0 if is_above_trend else REGIME_FILTER_MULTIPLIER
+
+        # ═══════════════════════════════════════════════════════
+        # BÖLÜM 1: EMA Hizalama (En Ağırlıklı — 3.0 puan)
+        # EMA9 > EMA21 > EMA50 = Tam momentum hizalama
+        # ═══════════════════════════════════════════════════════
+        alignment = summary.get('ema_alignment', 'neutral')
+        ema_f = summary.get('ema_fast')
+        ema_m = summary.get('ema_mid')
+        ema_s = summary.get('ema_slow')
+
+        if alignment == 'full_bull':               # EMA9>EMA21>EMA50
+            ema_score = 3.0
+            reasons.append("EMA tam hizalama ↑ (9>21>50)")
+        elif alignment == 'partial_bull':           # EMA9>EMA21
+            ema_score = 1.5
+            reasons.append("EMA kısmi hizalama ↑ (9>21)")
+        elif alignment == 'full_bear':              # EMA9<EMA21<EMA50
+            ema_score = -3.0
+            reasons.append("EMA tam hizalama ↓ (9<21<50)")
+        elif alignment == 'partial_bear':           # EMA9<EMA21
+            ema_score = -1.5
+            reasons.append("EMA kısmi hizalama ↓ (9<21)")
         else:
-            rsi_score = 0
+            ema_score = 0.0
 
-        score += rsi_score
-        details['rsi']['score'] = rsi_score
-        score_breakdown['RSI'] = f"{rsi_score:+.1f} (val={rsi_val:.1f}, {rsi_signal})"
-
-        # ─── MACD Değerlendirmesi ──────────────────────────────
-        macd_signal = summary['macd_signal']
-        details['macd'] = {'signal': macd_signal, 'histogram': summary['macd_histogram']}
-
-        if macd_signal == 'bullish_crossover':
-            macd_score = SIGNAL_WEIGHTS['macd']
-            reasons.append("MACD yükseliş kesişimi (bullish crossover)")
-        elif macd_signal == 'bearish_crossover':
-            macd_score = -SIGNAL_WEIGHTS['macd']
-            reasons.append("MACD düşüş kesişimi (bearish crossover)")
-        elif macd_signal == 'bullish_momentum':
-            macd_score = SIGNAL_WEIGHTS['macd'] * 0.5
-            reasons.append("MACD yükseliş momentumu")
-        elif macd_signal == 'bearish_momentum':
-            macd_score = -SIGNAL_WEIGHTS['macd'] * 0.5
-            reasons.append("MACD düşüş momentumu")
-        else:
-            macd_score = 0
-
-        score += macd_score
-        details['macd']['score'] = macd_score
-        score_breakdown['MACD'] = f"{macd_score:+.1f} ({macd_signal})"
-
-        # ─── Bollinger Bands Değerlendirmesi ───────────────────
-        bb_signal = summary['bollinger_signal']
-        details['bollinger'] = {
-            'signal': bb_signal,
-            'lower': summary['bb_lower'],
-            'upper': summary['bb_upper']
-        }
-
-        if bb_signal in ('below_lower', 'near_lower'):
-            bb_score = SIGNAL_WEIGHTS['bollinger']
-            reasons.append(f"Fiyat Bollinger alt bandında ({bb_signal})")
-        elif bb_signal in ('above_upper', 'near_upper'):
-            bb_score = -SIGNAL_WEIGHTS['bollinger']
-            reasons.append(f"Fiyat Bollinger üst bandında ({bb_signal})")
-        else:
-            bb_score = 0
-
-        score += bb_score
-        details['bollinger']['score'] = bb_score
-        score_breakdown['Bollinger'] = f"{bb_score:+.1f} ({bb_signal})"
-
-        # ─── EMA Değerlendirmesi ───────────────────────────────
-        ema_signal = summary['ema_signal']
-        details['ema'] = {
-            'signal': ema_signal,
-            'ema_short': summary['ema_short'],
-            'ema_long': summary['ema_long']
-        }
-
-        if ema_signal == 'golden_cross':
-            ema_score = SIGNAL_WEIGHTS['ema']
-            reasons.append("Golden Cross! (EMA50 > EMA200)")
-        elif ema_signal == 'death_cross':
-            ema_score = -SIGNAL_WEIGHTS['ema']
-            reasons.append("Death Cross! (EMA50 < EMA200)")
-        elif ema_signal == 'uptrend':
-            ema_score = SIGNAL_WEIGHTS['ema'] * 0.4
-        elif ema_signal == 'downtrend':
-            ema_score = -SIGNAL_WEIGHTS['ema'] * 0.4
-        else:
-            ema_score = 0
+        # EMA9'un EMA21'i yeni kesmesi (EN GÜÇLÜ kurulum)
+        try:
+            ema_f_prev = df['ema_fast'].iloc[index - 1]
+            ema_m_prev = df['ema_mid'].iloc[index - 1]
+            if not pd.isna(ema_f_prev) and not pd.isna(ema_m_prev):
+                if ema_f_prev <= ema_m_prev and ema_f > ema_m:
+                    ema_score += 1.0  # Taze crossover bonus
+                    reasons.append("🔥 EMA9 taze kesişim (fresh cross)")
+                elif ema_f_prev >= ema_m_prev and ema_f < ema_m:
+                    ema_score -= 1.0
+                    reasons.append("🔥 EMA9 aşağı kesişim (fresh cross)")
+        except (IndexError, KeyError):
+            pass
 
         score += ema_score
-        details['ema']['score'] = ema_score
-        score_breakdown['EMA'] = f"{ema_score:+.1f} ({ema_signal})"
+        breakdown['EMA'] = f"{ema_score:+.1f} ({alignment})"
 
-        # ─── Hacim Değerlendirmesi ─────────────────────────────
-        vol_signal = summary['volume_signal']
-        details['volume'] = {'signal': vol_signal}
+        # ═══════════════════════════════════════════════════════
+        # BÖLÜM 2: MACD — Momentum Teyidi (2.0 puan)
+        # ═══════════════════════════════════════════════════════
+        macd_sig = summary.get('macd_signal', 'neutral')
 
-        if vol_signal in ('high', 'very_high'):
-            vol_boost = 1.3 if vol_signal == 'very_high' else 1.0
-            if score > 0:
-                vol_score = SIGNAL_WEIGHTS['volume'] * vol_boost
-                reasons.append(f"Yüksek hacim onayı ({vol_signal})")
-            elif score < 0:
-                vol_score = -SIGNAL_WEIGHTS['volume'] * vol_boost
-                reasons.append(f"Yüksek hacim onayı ({vol_signal})")
-            else:
-                vol_score = 0
-        elif vol_signal in ('low', 'very_low'):
-            vol_score = 0
-            if abs(score) > 3:
-                reasons.append(f"⚠️ Düşük hacim - sinyal zayıf ({vol_signal})")
+        if macd_sig == 'bullish_crossover':
+            macd_score = 2.0
+            reasons.append("MACD bullish crossover")
+        elif macd_sig == 'bullish_momentum':
+            macd_score = 1.0
+            reasons.append("MACD momentum ↑")
+        elif macd_sig == 'bearish_crossover':
+            macd_score = -2.0
+            reasons.append("MACD bearish crossover")
+        elif macd_sig == 'bearish_momentum':
+            macd_score = -1.0
+            reasons.append("MACD momentum ↓")
         else:
-            vol_score = 0
+            macd_score = 0.0
+
+        score += macd_score
+        breakdown['MACD'] = f"{macd_score:+.1f} ({macd_sig})"
+
+        # ═══════════════════════════════════════════════════════
+        # BÖLÜM 3: RSI Zone Filtresi (2.0 puan)
+        # Long zone: RSI 40-65 (trend içinde hareket, aşırı değil)
+        # Short zone: RSI 35-60
+        # ═══════════════════════════════════════════════════════
+        rsi_val = summary.get('rsi', 50)
+        rsi_sig = summary.get('rsi_signal', 'neutral')
+
+        if RSI_LONG_MIN <= rsi_val <= RSI_LONG_MAX:
+            # İdeal long zone: momentum var ama henüz tüketilmemiş
+            rsi_score = 2.0
+            reasons.append(f"RSI long zone ({rsi_val:.1f})")
+        elif rsi_val < RSI_LONG_MIN:
+            # Çok düşük RSI — ya oversold toparlaması ya da devam düşüş
+            rsi_score = 1.0 if rsi_sig == 'oversold' else -0.5
+        elif rsi_val > RSI_LONG_MAX:
+            # Aşırı alım — long için zayıf, short için güçlü
+            rsi_score = -2.0
+            reasons.append(f"RSI aşırı alım ({rsi_val:.1f})")
+        else:
+            rsi_score = 0.0
+
+        score += rsi_score
+        breakdown['RSI'] = f"{rsi_score:+.1f} (val={rsi_val:.1f})"
+
+        # ═══════════════════════════════════════════════════════
+        # BÖLÜM 4: Volume Onayı (1.5 puan)
+        # Breakout hacim olmadan → sahte hareket riski yüksek
+        # ═══════════════════════════════════════════════════════
+        vol_sig = summary.get('volume_signal', 'normal')
+
+        if vol_sig == 'very_high':
+            vol_score = 1.5 if score > 0 else -1.5
+            reasons.append(f"Hacim patlaması ({vol_sig})")
+        elif vol_sig in ('high', 'above_normal'):
+            vol_score = 0.8 if score > 0 else -0.8
+            reasons.append(f"Yüksek hacim onayı ({vol_sig})")
+        elif vol_sig in ('low', 'very_low'):
+            vol_score = -0.5
+            reasons.append(f"⚠️ Düşük hacim — dikkat")
+        else:
+            vol_score = 0.0
 
         score += vol_score
-        details['volume']['score'] = vol_score
-        score_breakdown['Volume'] = f"{vol_score:+.1f} ({vol_signal})"
+        breakdown['Volume'] = f"{vol_score:+.1f} ({vol_sig})"
 
-        # ─── REJİM FİLTRESİ (Faz 1 — Kritik) ──────────────────
-        # EMA200 altında long sinyaller çok daha zor
-        current_price = summary['price']
-        ema_long_val = summary['ema_long']
-        is_bearish_regime = current_price < ema_long_val if ema_long_val else False
-
-        buy_threshold = BUY_THRESHOLD
-        sell_threshold = SELL_THRESHOLD
-
-        if is_bearish_regime:
-            buy_threshold = BUY_THRESHOLD * REGIME_FILTER_MULTIPLIER
-            score_breakdown['Regime'] = f"BEARISH (fiyat < EMA200, BUY eşiği {buy_threshold:.1f})"
+        # ═══════════════════════════════════════════════════════
+        # BÖLÜM 5: EMA200 Rejim Bonus/Penaltı (1.5 puan)
+        # ═══════════════════════════════════════════════════════
+        if is_above_trend:
+            regime_score = 1.5 if score > 0 else 0.0
+            breakdown['Regime'] = f"+1.5 (EMA200 üstü, BULLISH)"
         else:
-            score_breakdown['Regime'] = f"BULLISH (fiyat > EMA200, BUY eşiği {buy_threshold:.1f})"
+            regime_score = -1.0 if score > 0 else 0.0
+            breakdown['Regime'] = f"-1.0 (EMA200 altı, BEARISH)"
 
-        # ─── Trend Filtresi (Güvenlik) ─────────────────────────
-        if score >= buy_threshold and ema_signal == 'death_cross':
-            score *= 0.5
-            reasons.append("⚠️ Death Cross aktif - sinyal zayıflatıldı")
+        score += regime_score
 
-        if score <= sell_threshold and ema_signal == 'golden_cross':
-            score *= 0.5
-            reasons.append("⚠️ Golden Cross aktif - sinyal zayıflatıldı")
+        # ═══════════════════════════════════════════════════════
+        # ADX Yönü — Ters trend işlemi engelle
+        # ADX strong_bull iken SELL → puanı zorlaştır
+        # ADX strong_bear iken BUY → puanı zorlaştır
+        # ═══════════════════════════════════════════════════════
+        effective_buy_threshold  = BUY_THRESHOLD * buy_multiplier
+        effective_sell_threshold = SELL_THRESHOLD
 
-        # ─── Son Karar (rejim-aware threshold) ─────────────────
-        if score >= buy_threshold:
+        # ADX yönü ile sinyal yönü uyumlu mu?
+        if is_adx_bull and score < 0:
+            score *= 0.6  # ADX yukari, biz sat diyoruz → zayıflat
+            reasons.append("⚠️ ADX bull trend — SAT sinyali zayıflatıldı")
+        elif is_adx_bear and score > 0:
+            score *= 0.6  # ADX aşağı, biz al diyoruz → zayıflat
+            reasons.append("⚠️ ADX bear trend — AL sinyali zayıflatıldı")
+
+        breakdown['Threshold'] = (f"BUY={effective_buy_threshold:.1f} | "
+                                  f"SELL={effective_sell_threshold:.1f}")
+        breakdown['TOPLAM'] = f"{score:+.1f}"
+
+        # ═══════════════════════════════════════════════════════
+        # KARAR
+        # ═══════════════════════════════════════════════════════
+        if score >= effective_buy_threshold:
             signal = 'BUY'
-            reasons.insert(0, f"🟢 AL SİNYALİ (skor: {score:.1f}, eşik: {buy_threshold:.1f})")
-        elif score <= sell_threshold:
+            reasons.insert(0, f"🟢 AL SİNYALİ (skor: {score:.1f} ≥ {effective_buy_threshold:.1f})")
+        elif score <= effective_sell_threshold:
             signal = 'SELL'
             reasons.insert(0, f"🔴 SAT SİNYALİ (skor: {score:.1f})")
         else:
             signal = 'HOLD'
-            reasons.insert(0, f"⚪ BEKLE (skor: {score:.1f}, BUY eşiği: {buy_threshold:.1f})")
-
-        score_breakdown['TOPLAM'] = f"{score:+.1f}"
-
-        result = {
-            'signal': signal,
-            'score': round(score, 2),
-            'price': summary['price'],
-            'reasons': reasons,
-            'details': details,
-            'score_breakdown': score_breakdown,
-        }
+            reasons.insert(0, f"⚪ BEKLE (skor: {score:.1f}, BUY eşiği: {effective_buy_threshold:.1f})")
 
         if signal != 'HOLD':
             logger.info(
-                f"{'🟢' if signal == 'BUY' else '🔴'} {signal} sinyali! "
-                f"Skor: {score:.1f} | Fiyat: ${summary['price']:,.2f} | "
-                f"Rejim: {'BEARISH' if is_bearish_regime else 'BULLISH'}"
+                f"{'🟢' if signal == 'BUY' else '🔴'} {signal} | "
+                f"Skor: {score:.1f} | ADX: {adx_val:.1f} | "
+                f"EMA: {alignment} | Fiyat: ${price:,.4f}"
             )
 
-        return result
+        return {
+            'signal':          signal,
+            'score':           round(score, 2),
+            'price':           price,
+            'adx':             adx_val,
+            'ema_alignment':   alignment,
+            'reasons':         reasons,
+            'details':         details,
+            'score_breakdown': breakdown,
+        }
+
+    # ──────────────────────────────────────────────────────────
+    # Yardımcılar
+    # ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _hold(reason, adx=None):
+        """HOLD sinyali döndürür."""
+        return {
+            'signal':          'HOLD',
+            'score':           0,
+            'price':           0,
+            'adx':             adx,
+            'ema_alignment':   'neutral',
+            'reasons':         [reason],
+            'details':         {},
+            'score_breakdown': {'Reason': reason},
+        }

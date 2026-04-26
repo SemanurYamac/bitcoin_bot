@@ -141,6 +141,47 @@ class TelegramNotifier:
 
         self.send_message(message)
 
+    def send_partial_tp(self, result):
+        """
+        Kısmi kâr alma (Partial TP) bildirimi gönderir.
+
+        Mesajda şunlar yer alır:
+          - Kapatılan miktar ve yüzde
+          - Giriş / çıkış fiyatı ve net kâr
+          - Kalan miktar ve yeni Stop-Loss (breakeven)
+        """
+        symbol_name = result.get('symbol', '?')
+        coin = symbol_name.split('/')[0] if symbol_name and '/' in symbol_name else symbol_name
+
+        entry   = result.get('entry_price', 0)
+        exit_p  = result.get('exit_price', 0)
+        net_pnl = result.get('net_pnl', 0)
+        pnl_pct = result.get('pnl_percent', 0)
+        close_pct   = result.get('close_percent', 0.5) * 100
+        close_amount = result.get('close_amount', 0)
+        remaining    = result.get('remaining_amount', 0)
+        r_mult  = result.get('r_multiple', 1.5)
+        partial_price = result.get('partial_tp_price', 0)
+
+        pnl_emoji = '💰' if net_pnl >= 0 else '📉'
+
+        message = (
+            f"🎯 <b>KISMİ KÂR ALINDI ({r_mult}R)</b>\n"
+            f"🪙 <b>{symbol_name}</b>\n\n"
+            f"📌 Giriş: <code>${entry:,.2f}</code>\n"
+            f"📌 Çıkış: <code>${exit_p:,.2f}</code>\n"
+            f"🎯 Partial TP Hedefi: <code>${partial_price:,.2f}</code>\n\n"
+            f"📦 Kapatılan: <code>{close_amount:.6f} {coin} (%{close_pct:.0f})</code>\n"
+            f"📦 Kalan: <code>{remaining:.6f} {coin} (%{100-close_pct:.0f})</code>\n\n"
+            f"{pnl_emoji} Net Kâr: <code>${net_pnl:+,.2f} ({pnl_pct:+.2f}%)</code>\n"
+            f"🔒 Kalan için SL → Breakeven (<code>${entry:,.2f}</code>)\n\n"
+            f"<i>Kalan pozisyon sıfır riskle devam ediyor...</i>\n\n"
+            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+        self.send_message(message)
+
+
     def send_daily_report(self, report_data):
         """Günlük rapor gönderir."""
         message = (
@@ -154,6 +195,7 @@ class TelegramNotifier:
             f"💹 BTC Fiyatı: <code>${report_data.get('btc_price', 0):,.2f}</code>\n\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
+
 
         self.send_message(message)
 
@@ -209,14 +251,20 @@ class TelegramNotifier:
 
     def send_bot_started(self):
         """Bot başlangıç bildirimi."""
+        import os
+        from config.settings import RISK_PER_TRADE
+        mode_text = os.getenv('TRADING_MODE', 'PAPER').upper()
+        mode_icon = "🔴" if mode_text == 'LIVE' else "🟢"
+        risk_pct = RISK_PER_TRADE * 100
+        
         message = (
-            f"🤖 <b>Bitcoin Bot Başlatıldı! (Faz 1)</b>\n\n"
-            f"🔧 Yeni özellikler:\n"
+            f"🤖 <b>Bitcoin Bot Başlatıldı!</b>\n\n"
+            f"{mode_icon} <b>Çalışma Modu:</b> {mode_text}\n"
+            f"🔧 Özellikler:\n"
             f"  • Closed candle sinyal\n"
             f"  • Rejim filtresi (EMA200)\n"
-            f"  • Risk-based sizing (%1/trade)\n"
-            f"  • Cooldown (2 mum)\n"
-            f"  • Fail-safe koruma\n\n"
+            f"  • Risk Limit: {risk_pct:.1f}%\n"
+            f"  • ATR Dinamik Stop-Loss\n\n"
             f"📊 Piyasa taranıyor...\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )

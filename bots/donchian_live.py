@@ -26,6 +26,10 @@ from pathlib import Path
 
 import ccxt
 
+from datetime import timedelta
+
+TR_TZ = timezone(timedelta(hours=3))  # Türkiye saati (UTC+3)
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger('donchian')
 
@@ -326,6 +330,38 @@ class DonchianLiveBot:
         logger.info(msg.replace('\n', ' | '))
         self.tg.send(msg)
 
+    # ------------------------------------------------ daily report
+    def _daily_report(self):
+        """Her gün ilk taramada (00:00 TR sonrası) bakiye + pozisyon + PnL raporu."""
+        free_usdt = self._free('USDT') if self.live else 0.0
+        pos_lines, pos_value = [], 0.0
+        for sym, pos in self.state['positions'].items():
+            try:
+                price = self._ticker_price(sym)
+            except Exception:
+                price = pos['entry']
+            val = pos['amount'] * price
+            pos_value += val
+            pnl_pct = (price / pos['entry'] - 1) * 100
+            pos_lines.append(f'• {sym}: ${val:.2f} ({pnl_pct:+.1f}%) | stop {pos["stop"]:.6f}')
+
+        equity = free_usdt + pos_value
+        baseline = self.state.setdefault('baseline_equity', equity)
+        total_pct = (equity / baseline - 1) * 100 if baseline else 0.0
+        closed = self.state['closed_trades']
+        realized = sum(t['pnl'] for t in closed)
+
+        msg = (f'📊 Donchian günlük rapor — {datetime.now(TR_TZ).strftime("%d.%m.%Y %H:%M")}\n'
+               f'━━━━━━━━━━━━━━━\n'
+               f'💰 Toplam değer: ${equity:.2f} ({total_pct:+.2f}% başlangıçtan)\n'
+               f'💵 Serbest USDT: ${free_usdt:.2f}\n'
+               f'🌗 Rejim: {self.state.get("regime", "?")}\n'
+               f'📈 Açık pozisyon: {len(self.state["positions"])}\n'
+               + ('\n'.join(pos_lines) + '\n' if pos_lines else '')
+               + f'✅ Gerçekleşen PnL: ${realized:+.2f} ({len(closed)} kapanmış işlem)')
+        self.tg.send(msg)
+        logger.info('Günlük rapor gönderildi')
+
     def run(self):
         mode = 'CANLI 🔴' if self.live else 'DRY-RUN'
         self.tg.send(f'🐢 Donchian Weekly bot başladı ({mode}) — '
@@ -337,7 +373,18 @@ class DonchianLiveBot:
             except Exception as e:
                 logger.error(f'Tarama hatası: {e}')
                 self.tg.send(f'❌ Donchian tarama hatası: {e}')
-            time.sleep(CHECK_INTERVAL)
+
+            today = datetime.now(TR_TZ).strftime('%Y-%m-%d')
+            if self.state.get('last_report_day') != today:
+                try:
+                    self._daily_report()
+                    self.state['last_report_day'] = today
+                    self._save_state()
+                except Exception as e:
+                    logger.error(f'Günlük rapor hatası: {e}')
+
+            # Bir sonraki tam saate hizalan → gece yarısı taraması tam 00:00'da olur
+            time.sleep(CHECK_INTERVAL - time.time() % CHECK_INTERVAL)
 
 
 def main():

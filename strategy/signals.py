@@ -24,6 +24,9 @@ Neden işe yarar:
     E = (0.45 × 3R) - (0.55 × 1R) = +0.80R per trade
 """
 import logging
+import os
+import joblib
+import numpy as np
 import pandas as pd
 from analysis.indicators import TechnicalIndicators
 from config.settings import (
@@ -42,21 +45,26 @@ EMA_LONG = EMA_TREND
 
 class SignalGenerator:
     """
-    Momentum Rider sinyal sistemi.
-    ADX + EMA Hizalama + RSI Zone + Hacim = Yüksek olasılıklı kurulum.
+    Momentum Rider + XGBoost ML sinyal sistemi.
     """
+    
+    def __init__(self):
+        self.model = None
+        model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'xgboost_model.joblib')
+        try:
+            if os.path.exists(model_path):
+                self.model = joblib.load(model_path)
+                logger.info(f"🧠 XGBoost AI Modeli yüklendi: {model_path}")
+        except Exception as e:
+            logger.error(f"⚠️ XGBoost Modeli yüklenemedi: {e}")
 
     def generate_signal(self, df, index=-1):
         """
-        Momentum Rider sinyal üretimi.
-
-        Puanlama sistemi (max +10 BUY, min -10 SELL):
-          ADX Filtresi  : Geçmezse işlem yok (hard gate)
-          EMA Hizalama  : +3.0 / -3.0 (en ağırlıklı)
-          MACD          : +2.0 / -2.0
-          RSI Zone      : +2.0 / -2.0
-          Volume Onayı  : +1.5 / -1.5
-          EMA200 Rejim  : +1.5 / -1.5 (genel yön)
+        Sinyal üretimi (ML + Momentum).
+        
+        Öncelikle XGBoost modeline sorulur. Eğer %80+ güvenle BUY diyorsa
+        tüm kuralları ezip ALIM sinyali gönderilir. Değilse geleneksel
+        puanlama sistemi çalışır.
 
         Returns:
             dict: {signal, score, reasons, details, adx_value}
@@ -76,7 +84,139 @@ class SignalGenerator:
         adx_signal = summary.get('adx_signal', 'sideways')
 
         # ═══════════════════════════════════════════════════════
+        # HARD GATE 0: Makro Trend Filtresi (EMA200)
+        # Fiyat EMA200 altındaysa güçlü ayı trendi var — ML de dahil hiç işlem açma
+        # ═══════════════════════════════════════════════════════
+        ema_trend_val = summary.get('ema_long')
+        ema_slow_val  = summary.get('ema_slow')  # EMA50
+        if (ema_trend_val and not pd.isna(ema_trend_val) and price < ema_trend_val
+                and ema_slow_val and not pd.isna(ema_slow_val) and ema_slow_val < ema_trend_val):
+            return self._hold(
+                f'Ayı Rejimi: Fiyat EMA200 altı + EMA50 < EMA200 ({price:.0f} < {ema_trend_val:.0f})',
+                adx=adx_val
+            )
+
+        # ═══════════════════════════════════════════════════════
+        # YENİ: MAKİNE ÖĞRENMESİ (XGBoost AI)
+        # Model %75'in üzerinde başarı şansı görüyorsa doğrudan AL
+        # ═══════════════════════════════════════════════════════
+        if self.model is not None:
+            try:
+                # Feature'ları hazırla (ml_trainer.py ile birebir aynı olmalı)
+                bb_range = summary.get('bb_upper', 0) - summary.get('bb_lower', 0)
+                bb_pos = (price - summary.get('bb_lower', 0)) / bb_range if bb_range > 0 else 0.5
+                ema_long_val = summary.get('ema_long')
+                if ema_long_val is None or pd.isna(ema_long_val) or ema_long_val == 0:
+                    ema_dist = 0.0
+                else:
+                    ema_dist = (price - ema_long_val) / ema_long_val * 100
+                    
+                ema_short_val = summary.get('ema_short')
+                if ema_short_val is None or pd.isna(ema_short_val) or ema_short_val == 0:
+                    ema_short_dist = 0.0
+                else:
+                    ema_short_dist = (price - ema_short_val) / ema_short_val * 100
+                
+                # EMA50/EMA200 cross değeri
+                ema_slow_v = summary.get('ema_slow')
+                if ema_long_val and ema_slow_v and not pd.isna(ema_slow_v) and ema_long_val != 0:
+                    ema_cross = (ema_slow_v - ema_long_val) / ema_long_val * 100
+                else:
+                    ema_cross = 0.0
+
+                # Funding rate (df'de varsa, yoksa 0)
+                funding_rate = 0.0
+                funding_trend = 0.0
+                if 'funding_rate' in df.columns:
+                    fr_val = df['funding_rate'].iloc[index]
+                    funding_rate = float(fr_val) * 1000 if not pd.isna(fr_val) else 0.0
+                    fr_window = df['funding_rate'].iloc[max(0, index-3):index+1]
+                    funding_trend = float(fr_window.mean()) * 1000 if len(fr_window) > 0 else 0.0
+
+                # StochRSI
+                stoch_rsi = summary.get('stoch_rsi_k', 50) or 50
+
+                # Fiyat momentum (son 4 mum)
+                if index >= 4:
+                    price_4 = df['close'].iloc[index - 4]
+                    price_momentum = (price - price_4) / price_4 * 100 if price_4 != 0 else 0.0
+                else:
+                    price_momentum = 0.0
+
+                # Model sırası: ml_trainer.prepare_ml_features ile birebir aynı olmalı
+                feature_list = [
+                    summary.get('rsi', 50),
+                    summary.get('macd_histogram', 0),
+                    bb_pos,
+                    summary.get('volume_ratio', 1.0),
+                    ema_dist,
+                    ema_cross,
+                    summary.get('adx', 0),
+                    stoch_rsi,
+                ]
+                # Funding rate özellikleri modelde varsa ekle
+                n_features = len(self.model.feature_names_in_) if hasattr(self.model, 'feature_names_in_') else len(feature_list)
+                if n_features >= 10:
+                    feature_list += [funding_rate, funding_trend, price_momentum]
+                elif n_features >= 9:
+                    feature_list += [funding_rate, funding_trend]
+                features = np.array([feature_list[:n_features]])
+                
+                # NaN/Inf temizliği
+                features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # Tahmin
+                prob = self.model.predict_proba(features)[0][1] # Pozitif sınıf (1) olasılığı
+                
+                if prob > 0.60: # %60+ Güven (Yüksek kalite filtresi)
+                    return {
+                        'signal': 'BUY',
+                        'score': 10.0,
+                        'reasons': [f"🧠 AI SCALP TAHMİNİ: %{prob*100:.1f} Yükseliş İhtimali"],
+                        'details': {
+                            'breakdown': {'AI_Model': f'+10 (Prob: %{prob*100:.1f})'},
+                            'raw_score': 10.0,
+                            'threshold': 0.0
+                        },
+                        'adx': adx_val
+                    }
+                else:
+                    # Model yüklüyse ve yeterli güven yoksa, eski stratejilere gitmesini ENGELLİYORUZ!
+                    return {
+                        'signal': 'HOLD',
+                        'score': 0.0,
+                        'reasons': [f"🧠 AI Güven Yetersiz (%{prob*100:.1f})"],
+                        'details': {},
+                        'adx': adx_val
+                    }
+            except Exception as e:
+                logger.error(f"AI Scalp Error: {e}")
+
+        # ═══════════════════════════════════════════════════════
+        # ESKİ: MEAN REVERSION (Dipten Alma / Panik Alımı)
+        # Piyasa aşırı satıldığında ve fiyat bollinger bandından taştığında
+        # tüm kuralları (ADX dahil) ezip alım yapar.
+        # ═══════════════════════════════════════════════════════
+        bb_lower = summary.get('bb_lower')
+        rsi_val = summary.get('rsi', 50)
+        
+        # Bollinger alt bandının %2 altındaysa ve RSI < 25 ise (Gerçek Panik)
+        if bb_lower and price < (bb_lower * 0.98) and rsi_val < 25:
+            return {
+                'signal': 'BUY',
+                'score': 10.0,
+                'reasons': ["🚨 GERÇEK PANİK (Dipten Alım)", f"RSI={rsi_val:.1f}", f"Fiyat BB alt bant %2 altında"],
+                'details': {
+                    'breakdown': {'MeanReversion': '+10 (Dipten Alım)'},
+                    'raw_score': 10.0,
+                    'threshold': 0.0
+                },
+                'adx': adx_val
+            }
+
+        # ═══════════════════════════════════════════════════════
         # HARD GATE 1: ADX Filtresi
+
         # Sideways piyasada EN BÜYÜK kayıp kaynağı trend-following
         # ADX < eşik → hiç işlem yapma
         # ═══════════════════════════════════════════════════════
@@ -210,6 +350,27 @@ class SignalGenerator:
 
         score += vol_score
         breakdown['Volume'] = f"{vol_score:+.1f} ({vol_sig})"
+
+        # ═══════════════════════════════════════════════════════
+        # BÖLÜM 4.5: Hacim Tuzak Tespiti (YENİ — Penaltı)
+        # Fiyat yükseliyor ama hacim düşüyorsa → sahte breakout
+        # Hacim spike sonrası düşüş → tuzak olasılığı
+        # ═══════════════════════════════════════════════════════
+        trap_penalty = 0.0
+        vol_divergence = summary.get('volume_price_divergence', False)
+        is_trap = summary.get('is_trap_risk', False)
+        trap_desc = summary.get('volume_trap_desc', '')
+
+        if vol_divergence and score > 0:
+            trap_penalty = -1.5
+            reasons.append(f"⚠️ Hacim-fiyat uyumsuzluğu — sahte breakout riski")
+        elif is_trap and score > 0:
+            trap_penalty = -1.0
+            reasons.append(f"⚠️ Hacim tuzağı tespit edildi")
+
+        score += trap_penalty
+        if trap_penalty != 0:
+            breakdown['VolTrap'] = f"{trap_penalty:+.1f} ({trap_desc[:30]}...)"
 
         # ═══════════════════════════════════════════════════════
         # BÖLÜM 5: EMA200 Rejim Bonus/Penaltı (1.5 puan)

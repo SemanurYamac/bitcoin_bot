@@ -183,21 +183,113 @@ class TelegramNotifier:
 
 
     def send_daily_report(self, report_data):
-        """Günlük rapor gönderir."""
-        message = (
-            f"📊 <b>GÜNLÜK RAPOR</b>\n"
-            f"{'━' * 20}\n\n"
-            f"💰 Bakiye: <code>${report_data.get('balance', 0):,.2f}</code>\n"
-            f"📈 Günlük Değişim: <code>{report_data.get('daily_change', 0):+.2f}%</code>\n"
-            f"📊 Toplam Getiri: <code>{report_data.get('total_return', 0):+.2f}%</code>\n\n"
-            f"🔄 Bugünkü İşlem: <code>{report_data.get('daily_trades', 0)}</code>\n"
-            f"📌 Aktif Pozisyon: <code>{'Var' if report_data.get('has_position') else 'Yok'}</code>\n\n"
-            f"💹 BTC Fiyatı: <code>${report_data.get('btc_price', 0):,.2f}</code>\n\n"
-            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
+        """
+        Kapsamlı günlük rapor gönderir (12:00 → 12:00).
+        Komisyon çıkılmış net kâr, açık pozisyonlar, toplam portföy.
+        """
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
 
+        # Temel veriler
+        balance = report_data.get('balance', 0)
+        initial_balance = report_data.get('initial_balance', 0)
+        btc_price = report_data.get('btc_price', 0)
 
-        self.send_message(message)
+        # İşlem özeti
+        trades_today = report_data.get('trades_today', [])
+        total_gross_pnl = report_data.get('total_gross_pnl', 0)
+        total_fees = report_data.get('total_fees', 0)
+        total_net_pnl = report_data.get('total_net_pnl', 0)
+
+        # Açık pozisyonlar
+        open_positions = report_data.get('open_positions', [])
+        unrealized_pnl = report_data.get('unrealized_pnl', 0)
+
+        # Genel istatistikler
+        total_return = report_data.get('total_return', 0)
+        total_trades_alltime = report_data.get('total_trades_alltime', 0)
+        win_count = report_data.get('win_count', 0)
+        loss_count = report_data.get('loss_count', 0)
+
+        # Net portföy değeri
+        net_portfolio = balance + unrealized_pnl
+
+        # Başlık ve emoji
+        pnl_emoji = '📈' if total_net_pnl >= 0 else '📉'
+        port_emoji = '🟢' if net_portfolio >= initial_balance else '🔴'
+
+        lines = [
+            f"📊 <b>GÜNLÜK RAPOR</b> ({now_str})",
+            f"{'━' * 28}",
+            "",
+        ]
+
+        # 1. Son 24 saat işlemler
+        lines.append("📋 <b>Son 24 Saat İşlemler:</b>")
+        if trades_today:
+            for t in trades_today:
+                side_emoji = '🟢' if t.get('side') == 'buy' else '🔴'
+                coin = t.get('symbol', '?').split('/')[0]
+                pnl = t.get('net_pnl', 0)
+                pnl_str = f"${pnl:+,.2f}" if pnl != 0 else ""
+                lines.append(
+                    f"  {side_emoji} {coin} | "
+                    f"${t.get('price', 0):,.2f} | "
+                    f"{t.get('amount', 0):.4f} {pnl_str}"
+                )
+
+            lines.append("")
+            lines.append(f"  💵 Brüt PnL: <code>${total_gross_pnl:+,.2f}</code>")
+            lines.append(f"  💸 Komisyon:  <code>-${total_fees:,.2f}</code>")
+            lines.append(f"  {pnl_emoji} <b>Net PnL:  <code>${total_net_pnl:+,.2f}</code></b>")
+        else:
+            lines.append("  ⚪ İşlem yapılmadı")
+
+        lines.append("")
+
+        # 2. Açık pozisyonlar
+        lines.append("📌 <b>Açık Pozisyonlar:</b>")
+        if open_positions:
+            for pos in open_positions:
+                coin = pos.get('symbol', '?').split('/')[0]
+                entry = pos.get('entry_price', 0)
+                current = pos.get('current_price', 0)
+                pnl_usd = pos.get('pnl_usd', 0)
+                pnl_pct = pos.get('pnl_pct', 0)
+                pos_emoji = '📈' if pnl_usd >= 0 else '📉'
+                lines.append(
+                    f"  🪙 {coin} | Giriş: ${entry:,.2f} → ${current:,.2f} | "
+                    f"{pos_emoji} ${pnl_usd:+,.2f} ({pnl_pct:+.2f}%)"
+                )
+        else:
+            lines.append("  ⚪ Açık pozisyon yok")
+
+        lines.append("")
+
+        # 3. Portföy özeti
+        lines.append("💰 <b>Portföy Özeti:</b>")
+        lines.append(f"  Bakiye:       <code>${balance:,.2f}</code>")
+        lines.append(f"  Unrealized:   <code>${unrealized_pnl:+,.2f}</code>")
+        lines.append(f"  {port_emoji} Net Değer:  <code>${net_portfolio:,.2f}</code>")
+        if initial_balance > 0:
+            lines.append(f"  Toplam Getiri: <code>{total_return:+.2f}%</code>")
+
+        lines.append("")
+
+        # 4. BTC fiyat bilgisi
+        if btc_price > 0:
+            lines.append(f"💹 BTC: <code>${btc_price:,.2f}</code>")
+
+        lines.append("")
+
+        # 5. İstatistikler
+        if total_trades_alltime > 0:
+            win_rate = (win_count / (win_count + loss_count) * 100) if (win_count + loss_count) > 0 else 0
+            lines.append(f"📊 Tüm Zamanlar: {total_trades_alltime} işlem | "
+                         f"Win: {win_rate:.0f}% ({win_count}W/{loss_count}L)")
+
+        lines.append(f"\n⏰ {now_str}")
+
+        self.send_message('\n'.join(lines))
 
     def send_error(self, error_message):
         """Hata bildirimi gönderir."""

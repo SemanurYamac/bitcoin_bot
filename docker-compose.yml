@@ -1,18 +1,37 @@
 version: '3.8'
 
 services:
-  bitcoin_abot:
+  bitcoin_bot:
     build: .
     container_name: btc_trading_bot
-    # Bot çökerse veya sunucu yeniden başlarsa sonsuza kadar otomatik restart atar
-    restart: always  
+    image: btc_trading_bot:latest
+
+    # Sunucu restart olsa bile, container crash etse bile otomatik yeniden başlar
+    restart: always
+
+    # .env dosyasındaki tüm API anahtarlarını otomatik yükle
+    env_file:
+      - .env
+
     environment:
       - PYTHONUTF8=1
-      # İsterseniz timezone'u değiştirebilirsiniz
-      - TZ=Europe/Istanbul 
+      - TZ=Europe/Istanbul
+      - TRADING_MODE=live
+
     volumes:
-      # Verilerin silinmemesi için konteyner dışına köprü kuruyoruz
+      # Loglar ve state dışarıda kalır — container silinse bile kaybolmaz
       - ./data:/app/data
       - ./logs:/app/logs
-      # Ortam değişkenlerinizi içeri aktarıyoruz
-      - ./.env:/app/.env
+
+    # Bellek limiti: Trading bot için 512MB fazlasıyla yeterli
+    mem_limit: 512m
+
+    # Ağ kesintisinde container'ı öldürme, bot kendi retry mekanizmasıyla halleder
+    stop_grace_period: 30s
+
+    # Log rotasyonu: Disk dolmasın
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"

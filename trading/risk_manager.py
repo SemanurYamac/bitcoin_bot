@@ -10,7 +10,8 @@ from config.settings import (
     MAX_DRAWDOWN_PERCENT, TRAILING_STOP_PERCENT, TRAILING_ACTIVATION,
     MAX_DAILY_TRADES, COOLDOWN_CANDLES,
     PARTIAL_TP_ENABLED, PARTIAL_TP_R_MULTIPLE,
-    PARTIAL_TP_CLOSE_PERCENT, PARTIAL_TP_MOVE_SL_TO_BE
+    PARTIAL_TP_CLOSE_PERCENT, PARTIAL_TP_MOVE_SL_TO_BE,
+    ATR_TRAIL_MULT
 )
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,8 @@ class RiskManager:
             # Partial TP alanları
             'partial_tp_price': partial_tp_price,
             'partial_tp_triggered': False,
+            # ATR değeri — dinamik trailing stop için
+            'atr_at_entry': atr,
         }
 
         self.daily_trades += 1
@@ -364,6 +367,7 @@ class RiskManager:
     def check_exit_conditions(self, current_price):
         """
         Mevcut pozisyon için çıkış koşullarını kontrol eder.
+        ATR bazlı dinamik trailing stop: Kâr yukarı çıktıkça SL otomatik yukarı çekilir.
 
         Returns:
             tuple: (should_exit: bool, reason: str)
@@ -386,13 +390,45 @@ class RiskManager:
         elif side == 'sell' and current_price <= pos['take_profit']:
             return True, f"Take-Profit tetiklendi (${pos['take_profit']:,.2f})"
 
-        # ─── Trailing Stop Kontrolü ────────────────────────────
+        # ─── ATR Bazlı Dinamik Trailing Stop ───────────────────
+        # Kâr yukarı çıktıkça stop otomatik yukarı çekilir.
+        # - Normal trailing: peak - ATR × ATR_TRAIL_MULT
+        # - Partial TP sonrası: peak - ATR × (ATR_TRAIL_MULT × 0.75) (daha agresif)
         if side == 'buy':
             state_changed = False
+            entry_atr = pos.get('atr_at_entry')
+
             if current_price > pos.get('highest_price', pos['entry_price']):
                 pos['highest_price'] = current_price
-                pos['trailing_stop'] = current_price * (1 - TRAILING_STOP_PERCENT)
                 state_changed = True
+
+                # ATR bazlı trailing mesafe hesapla
+                if entry_atr and entry_atr > 0:
+                    # Partial TP sonrası daha agresif trailing
+                    if pos.get('partial_tp_triggered', False):
+                        trail_mult = ATR_TRAIL_MULT * 0.75  # Daha sıkı takip
+                    else:
+                        trail_mult = ATR_TRAIL_MULT
+                    trail_distance = entry_atr * trail_mult
+                    new_trailing = current_price - trail_distance
+                else:
+                    # ATR yoksa fallback: sabit %
+                    new_trailing = current_price * (1 - TRAILING_STOP_PERCENT)
+
+                # Trailing stop sadece yukarı çekilir, asla aşağı inmez
+                old_trailing = pos.get('trailing_stop')
+                if old_trailing is None or new_trailing > old_trailing:
+                    pos['trailing_stop'] = round(new_trailing, 2)
+
+                # Trailing stop, mevcut SL'den yüksekse SL'yi güncelle (ratchet)
+                if pos['trailing_stop'] > pos['stop_loss']:
+                    old_sl = pos['stop_loss']
+                    pos['stop_loss'] = pos['trailing_stop']
+                    logger.info(
+                        f"📈 {self.symbol} SL yukarı çekildi: "
+                        f"${old_sl:,.2f} → ${pos['stop_loss']:,.2f} "
+                        f"(peak: ${pos['highest_price']:,.2f})"
+                    )
 
             # Trailing sadece yeterli kâr oluşunca aktif
             min_profit_price = pos['entry_price'] * (1 + TRAILING_ACTIVATION)
@@ -401,7 +437,7 @@ class RiskManager:
                     pos['trailing_activated'] = True
                     self._save_state()
                     return True, f"Trailing Stop tetiklendi (${pos['trailing_stop']:,.2f})"
-                    
+
             if state_changed:
                 self._save_state()
 

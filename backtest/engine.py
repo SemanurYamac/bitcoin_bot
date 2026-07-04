@@ -21,7 +21,7 @@ from config.settings import (
     PARTIAL_TP_CLOSE_PERCENT, PARTIAL_TP_MOVE_SL_TO_BE,
     STOP_LOSS_PERCENT, TAKE_PROFIT_PERCENT,
     TRAILING_STOP_PERCENT, TRAILING_ACTIVATION,
-    ATR_SL_MULT, ATR_TP1_MULT, ATR_TP2_MULT,
+    ATR_SL_MULT, ATR_TP1_MULT, ATR_TP2_MULT, ATR_TRAIL_MULT,
     RISK_PER_TRADE, MAX_POSITION_PERCENT,
 )
 
@@ -139,10 +139,31 @@ class BacktestEngine:
                             f"SL → ${active_pos['stop_loss']:,.2f}"
                         )
 
-                # ── 2) Trailing Stop Güncelle ───────────────────────
+                # ── 2) Trailing Stop Güncelle (ATR Bazlı Dinamik) ────
                 if current_price > active_pos.get('highest_price', active_pos['entry_price']):
                     active_pos['highest_price'] = current_price
-                    active_pos['trailing_stop'] = current_price * (1 - TRAILING_STOP_PERCENT)
+
+                    # ATR bazlı trailing mesafe
+                    entry_atr = active_pos.get('atr_at_entry')
+                    if entry_atr and entry_atr > 0:
+                        # Partial TP sonrası daha agresif trailing
+                        if active_pos.get('partial_tp_triggered', False):
+                            trail_mult = ATR_TRAIL_MULT * 0.75
+                        else:
+                            trail_mult = ATR_TRAIL_MULT
+                        trail_distance = entry_atr * trail_mult
+                        new_trailing = current_price - trail_distance
+                    else:
+                        new_trailing = current_price * (1 - TRAILING_STOP_PERCENT)
+
+                    # Sadece yukarı çek, asla aşağı indirme
+                    old_trailing = active_pos.get('trailing_stop')
+                    if old_trailing is None or new_trailing > old_trailing:
+                        active_pos['trailing_stop'] = new_trailing
+
+                    # SL'yi de yukarı çek (ratchet)
+                    if active_pos['trailing_stop'] and active_pos['trailing_stop'] > active_pos['stop_loss']:
+                        active_pos['stop_loss'] = active_pos['trailing_stop']
 
                 # ── 3) Tam Exit Kontrol ─────────────────────────────
                 exit_reason = None
@@ -240,6 +261,7 @@ class BacktestEngine:
                     'partial_tp_triggered': False,
                     'highest_price':        current_price,
                     'trailing_stop':        None,
+                    'atr_at_entry':         atr,  # ATR bazlı trailing için
                 }
 
                 trades.append({

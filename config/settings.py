@@ -14,7 +14,7 @@ load_dotenv(Path(__file__).parent.parent / '.env')
 # ─── Borsa Ayarları ────────────────────────────────────────────────
 EXCHANGE = 'binance'
 SYMBOL = 'BTC/USDT'  # Varsayılan sembol (tek coin modu için)
-TIMEFRAME = '1h'   # 1h: ADX+EMA sinyali 15m gürültüsünden etkilenmiyor
+TIMEFRAME = '4h'   # 4h: Gürültü azalır, sinyal kalitesi artar, SL daha az tetiklenir
 
 # ─── Varlık Evreni (Faz 4 — Genişletilmiş) ────────────────────────
 #
@@ -35,31 +35,28 @@ TIMEFRAME = '1h'   # 1h: ADX+EMA sinyali 15m gürültüsünden etkilenmiyor
 # LINK ve XRP zaman zaman farklı beta sergiler. Bu çeşitlilik
 # tüm pozisyonların aynı anda zarara girmesini azaltır.
 
-# ── Faz 5 Coin Evreni: Momentum + Volatilite ───────────────────────────
+# ── Faz 6 Coin Evreni: Genişletilmiş + Optimizasyon ──────────────────────
 #
 # Seçim kriterleri:
 #   - Yüksek likidite (manipulasyon zorlaşsın)
-#   - Yüksek ATR/Fiyat oranı (çünkü bu 3:1 R:R sağlar)
+#   - Yüksek ATR/Fiyat oranı (çünkü bu 3:1+ R:R sağlar)
 #   - Farklı segmentler (BTC ile düşük korelasyon arayışı)
-#   - Backtest'te en tutarlı trendler
+#   - 2 yıllık backtest'te pozitif veya düşük zararlı performans
 #
 # BTC, ETH    : Likidite ve güvenilirlik
-# SOL, BNB    : Momentum, bakikalı trendler
+# SOL, BNB    : Momentum, bakıkalı trendler
 # DOGE        : Yatırımcı ilgisi yüksek, ATR geniş
-# XRP         : Farklı beta, haber dışı ADX filtresi geçince güvenilir
+# XRP         : Farklı beta, en iyi backtest sonucu (+8.97%)
+# AVAX, DOT   : Yeni eklenen — korelasyon çeşitliliği
 
 SYMBOLS = [
-    # --- 1. Koruyucu Mega Majörler ---
+    # --- Yapay Zekanın Uzmanlaştığı Şampiyon Kadro ---
     'BTC/USDT',    # Piyasa pusulası
-    'ETH/USDT',    # Şampiyon (+%6.61, sadece %3 MaxDD)
-    'SOL/USDT',    # Sağlam yüksek hacim
-    'XRP/USDT',    # İstikrarlı koruma
-    'LINK/USDT',   # Farklı korelasyon
-    
-    # --- 2. Momentum Roketleri (Optimizasyonun Yıldızları) ---
-    'FET/USDT',    # Mega şampiyon (+%8.10)
-    'INJ/USDT',    # En sert çöküşte hayatta kalıp kâr alma ustası
-    'AR/USDT',     # Arweave (+%4.27 defansif roket)
+    'ETH/USDT',    # DeFi temeli
+    'XRP/USDT',    # En iyi AI backtest sonucu
+    'BNB/USDT',    # Binance ekosistemi
+    'ADA/USDT',    # İkincil korelasyon
+    'DOT/USDT',    # İkincil korelasyon
 ]
 
 # Çoklu coin modu
@@ -69,8 +66,8 @@ MULTI_COIN_MODE = True
 MIN_VOLUME_24H = 1_000_000  # $1M
 
 # Aynı anda max açık pozisyon
-# 6 coin × max 3 eş zamanlı = portföyün max %60'u (%20x3)
-MAX_OPEN_POSITIONS = 3
+# 10 coin × max 4 eş zamanlı = portföyün max %80'i (%20×4)
+MAX_OPEN_POSITIONS = 4
 
 # ─── Tarama Ayarları ──────────────────────────────────────────────
 # Closed candle modu: True ise sadece kapanmış mum üzerinde sinyal üretir
@@ -90,23 +87,29 @@ POSITION_CHECK_INTERVAL = 300  # 5 dakika
 REGIME_FILTER_MULTIPLIER = 1.5
 
 # Cooldown
-COOLDOWN_CANDLES = 3  # 15m × 3 = 45 dakika bekleme
+# 4h timeframe: 1 mum = 4 SAAT bekleme. Pozisyon kapandıktan 4 saat
+# boyunca yeni fırsat değerlendirilmiyor. 4h'de 1 mum yeterli.
+COOLDOWN_CANDLES = 1  # 4h timeframe'de 1 mum = 4 saat bekleme
 
 # ADX Trend Güç Filtresi (Faz 5 YENİ — En Kritik)
 # Bu eşiğin altında hiçbir işlem yapılmaz
 # ADX < 20: Sideways (trend yok, en büyük kayıp kaynağı)
 # ADX 20-25: Zayıf trend (dikkatli)
 # ADX > 25: Güçlü trend (işlem yap)
+# Canlı log analizi (23-27 Nisan): 28 çok katı, BTC $77K→$79K hareketi yakalanmadı.
+# 25'e indirerek daha fazla momentum fırsatı yakalanır, hâlâ güvenli.
 ADX_PERIOD = 14
-ADX_THRESHOLD = 28  # Optimizasyon bulgusu: Daha zayıf trendlerde hata artıyor
+ADX_THRESHOLD = 25  # 28 → 25: Canlı log analizine göre güncellendi
 
 # RSI Zone Filtresi
 # Long zone: Alım için ideal RSI aralığı
 #   40-65: Momentum başladı ama hala enerji var
 #   < 35: Aşırı satım — dikkat, devam edebilir
 #   > 70: Aşırı alım — long için risklnli
-RSI_LONG_MIN = 45   # Dar zone: gerçek momentum
-RSI_LONG_MAX = 62   # Aşırı alım başlamadan önce çık
+# Canlı log: RSI_LONG_MIN=45 trend başlangıçlarını kaçırıyordu (40-45 arası en iyi giriş zone).
+# RSI_LONG_MAX=62 dar, yükselen trendlerde 62-65 arası hâlâ sağlıklı momentum.
+RSI_LONG_MIN = 40   # 45 → 40: Trend başlangıçlarını daha erken yakala
+RSI_LONG_MAX = 65   # 62 → 65: Zone biraz genişletildi
 RSI_SHORT_MIN = 35
 RSI_SHORT_MAX = 60
 
@@ -121,10 +124,11 @@ SIGNAL_WEIGHTS = {
     'adx':       0.0,   # Hard gate, puana katılmıyor
 }
 
-# Karar eşikleri (Makine öğrenmesi optimizasyonuyla belirlendi)
-# ADX(28+) + EMA full_bull(3+1=4) + MACD(2) + RSI zone(2) + Vol(1.5) + Regime(1.5) = 12
-# Çok daha emin sinyalleri yakalayarak Win Rate'i %48'e çıkardı.
-BUY_THRESHOLD = 7.0
+# Karar eşikleri (Faz 6 — Optimizasyon)
+# Backtest analizi: 6.5 çok düşük → fazla sinyal → düşük win rate (%35)
+# 7.0'a yükseltmek → daha az ama daha kaliteli sinyal → win rate ↑
+# 4h timeframe'de sinyaller zaten daha güvenilir, yüksek eşik mantıklı
+BUY_THRESHOLD = 7.0   # 6.5 → 7.0: Daha kaliteli sinyal, daha az işlem
 SELL_THRESHOLD = -7.0
 
 # ─── Partial Take-Profit (Kısmi Kâr Alma) ────────────────────────
@@ -204,12 +208,13 @@ RISK_PER_TRADE = 0.02         # %2 — gelir odaklı, hesaplanmış risk
 MAX_POSITION_PERCENT = 0.20   # %20 tek pozisyon max
 MAX_PORTFOLIO_EXPOSURE = 0.60 # %60 toplam
 
-# ATR çarpanları — Optimizasyon Testi Sonuçları
-# Botun fiyat gürültüsünden ölmemesi için SL daha esnek (2.0)
-# TP hedefleri ise çok daha yukarıda (2.5 ve 4.0)
-ATR_SL_MULT    = 2.0   # SL = giriş - 2.0 × ATR (Yeterli nefes alma payı)
-ATR_TP1_MULT   = 2.5   # TP1 = giriş + 2.5 × ATR (%40 pozisyon kilit)
-ATR_TP2_MULT   = 4.0   # TP2 = giriş + 4.0 × ATR (Trend takibi)
+# ATR çarpanları — Faz 6 Optimizasyon
+# Backtest bulgusu: SL çok dar → %35 win rate. SL genişletildi (2.0→2.5)
+# TP hedefi yükseltildi (4.0→5.0) → R:R oranı arttı
+# 4h timeframe'de ATR doğal olarak daha geniş → daha sağlıklı SL mesafesi
+ATR_SL_MULT    = 2.5   # SL = giriş - 2.5 × ATR (Daha geniş nefes alma payı)
+ATR_TP1_MULT   = 2.5   # TP1 = giriş + 2.5 × ATR (%50 pozisyon kilit)
+ATR_TP2_MULT   = 5.0   # TP2 = giriş + 5.0 × ATR (Uzun trend takibi)
 ATR_TRAIL_MULT = 2.0   # Trailing stop = peak - 2.0 × ATR
 
 # Fallback (ATR hesaplanamadığında)
@@ -218,7 +223,7 @@ TAKE_PROFIT_PERCENT  = 0.06   # %6 fallback TP (2.4:1 R:R)
 MAX_DRAWDOWN_PERCENT = 0.15   # %15 max portföy düşüşü
 TRAILING_STOP_PERCENT = 0.02  # %2 trailing stop
 TRAILING_ACTIVATION   = 0.03  # %3 kârdan sonra trailing aktif
-MAX_DAILY_TRADES = 8          # 6 coin × 1h = günlük makul limit
+MAX_DAILY_TRADES = 6          # 10 coin × 4h = günlük makul limit (4h'de daha az sinyal)
 
 # ─── Fail-Safe Ayarları ───────────────────────────────────────────
 # Ardışık hata sayısı bu eşiği geçerse bot koruma moduna geçer

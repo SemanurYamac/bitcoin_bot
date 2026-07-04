@@ -246,6 +246,96 @@ class DataCollector:
             logger.error(f"❌ Bakiye çekme hatası: {e}")
             raise
 
+    def get_top_coins_by_volume(self, n=10, quote='USDT', exclude=None):
+        """
+        Binance'de son 24 saatte en yüksek hacimli USDT çiftlerini döndürür.
+        Dinamik coin seçimi için kullanılır.
+
+        Args:
+            n: Kaç coin döndürülsün
+            quote: Kote para birimi (default USDT)
+            exclude: Hariç tutulacak semboller listesi
+
+        Returns:
+            list: ['BTC/USDT', 'ETH/USDT', ...] formatında sembol listesi
+        """
+        exclude = exclude or ['USDC/USDT', 'BUSD/USDT', 'TUSD/USDT', 'FDUSD/USDT', 'DAI/USDT']
+        try:
+            tickers = self.public_exchange.fetch_tickers()
+            usdt_pairs = {
+                k: v for k, v in tickers.items()
+                if k.endswith(f'/{quote}') and k not in exclude
+                and v.get('quoteVolume') and v['quoteVolume'] > 0
+            }
+            sorted_pairs = sorted(usdt_pairs.items(), key=lambda x: x[1]['quoteVolume'], reverse=True)
+            top = [pair[0] for pair in sorted_pairs[:n]]
+            logger.info(f"📊 Top {n} coin (hacme göre): {top}")
+            return top
+        except Exception as e:
+            logger.error(f"❌ Top coin tarama hatası: {e}")
+            return ['BTC/USDT', 'ETH/USDT', 'XRP/USDT', 'BNB/USDT', 'SOL/USDT']
+
+    def fetch_funding_rates(self, symbol, start_date, end_date=None):
+        """
+        Binance Futures perpetual funding rate geçmişini çeker.
+        ML özelliği olarak kullanılır (piyasa duygusu göstergesi).
+
+        Pozitif funding → herkes long → tepe uyarısı
+        Negatif funding → herkes short → dip fırsatı
+
+        Args:
+            symbol: Örn. 'BTC/USDT'
+            start_date: '2022-01-01' formatında
+            end_date: '2026-05-01' formatında (opsiyonel)
+
+        Returns:
+            pandas DataFrame: timestamp, funding_rate sütunları
+        """
+        try:
+            futures_exchange = ccxt.binance({
+                'enableRateLimit': True,
+                'options': {'defaultType': 'future'},
+            })
+
+            since = int(datetime.strptime(start_date, '%Y-%m-%d').timestamp() * 1000)
+            if end_date:
+                end_ts = int(datetime.strptime(end_date, '%Y-%m-%d').timestamp() * 1000)
+            else:
+                end_ts = int(datetime.now().timestamp() * 1000)
+
+            all_rates = []
+            current_since = since
+
+            while current_since < end_ts:
+                rates = futures_exchange.fetch_funding_rate_history(
+                    symbol, since=current_since, limit=1000
+                )
+                if not rates:
+                    break
+                all_rates.extend(rates)
+                current_since = rates[-1]['timestamp'] + 1
+                time.sleep(0.2)
+
+            if not all_rates:
+                return pd.DataFrame()
+
+            df = pd.DataFrame([{
+                'timestamp': pd.to_datetime(r['timestamp'], unit='ms'),
+                'funding_rate': r['fundingRate']
+            } for r in all_rates])
+            df.set_index('timestamp', inplace=True)
+            df = df[~df.index.duplicated(keep='first')].sort_index()
+
+            if end_date:
+                df = df[:end_date]
+
+            logger.info(f"✅ {symbol} funding rate: {len(df)} kayıt ({start_date} → {end_date})")
+            return df
+
+        except Exception as e:
+            logger.warning(f"⚠️ Funding rate çekilemedi ({symbol}): {e}")
+            return pd.DataFrame()
+
     def check_connection(self):
         """Borsa bağlantısını kontrol eder (hem gerçek hem testnet)."""
         try:

@@ -265,6 +265,89 @@ class TechnicalIndicators:
         return 'normal'
 
     @staticmethod
+    def get_volume_trend(df, index=-1, lookback=5):
+        """
+        Hacim trendini analiz eder — fiyat hareketini hacim destekliyor mu?
+
+        Kontroller:
+          1. Son N mumda hacim artıyor mu azalıyor mu?
+          2. Fiyat yükseliyor ama hacim düşüyorsa → sahte breakout riski
+          3. Ani hacim patlaması sonrası düşüş → tuzak olasılığı
+
+        Returns:
+          dict: {
+            'volume_trend': 'increasing' | 'decreasing' | 'flat',
+            'volume_price_divergence': True/False,
+            'is_trap_risk': True/False,
+            'description': str
+          }
+        """
+        result = {
+            'volume_trend': 'flat',
+            'volume_price_divergence': False,
+            'is_trap_risk': False,
+            'description': ''
+        }
+
+        try:
+            # Son lookback mumun hacimlerini al
+            start_idx = max(0, index - lookback + 1) if index >= 0 else max(0, len(df) + index - lookback + 1)
+            end_idx = index + 1 if index >= 0 else len(df) + index + 1
+            if end_idx <= 0:
+                end_idx = len(df)
+
+            volumes = df['volume'].iloc[start_idx:end_idx].values
+            closes  = df['close'].iloc[start_idx:end_idx].values
+
+            if len(volumes) < 3:
+                return result
+
+            # 1. Hacim trendi: son mumların ortalaması öncekilerden büyük mü?
+            half = len(volumes) // 2
+            first_half_avg = np.mean(volumes[:half])
+            second_half_avg = np.mean(volumes[half:])
+
+            if first_half_avg > 0:
+                vol_change = (second_half_avg - first_half_avg) / first_half_avg
+            else:
+                vol_change = 0
+
+            if vol_change > 0.15:
+                result['volume_trend'] = 'increasing'
+            elif vol_change < -0.15:
+                result['volume_trend'] = 'decreasing'
+            else:
+                result['volume_trend'] = 'flat'
+
+            # 2. Fiyat-Hacim Uyumsuzluğu (Divergence)
+            price_change = (closes[-1] - closes[0]) / closes[0] if closes[0] > 0 else 0
+
+            # Fiyat yükseliyor (%1+) ama hacim düşüyorsa → divergence
+            if price_change > 0.01 and vol_change < -0.15:
+                result['volume_price_divergence'] = True
+                result['description'] = f"⚠️ Fiyat ↑{price_change:.1%} ama hacim ↓{vol_change:.1%} — sahte breakout riski"
+
+            # Fiyat düşüyor ama hacim artıyorsa → panik satış (normal)
+            # Fiyat düşüyor ve hacim de düşüyorsa → ilgisizlik
+
+            # 3. Spike-and-Drop Tuzak Tespiti
+            # Bir önceki mumda çok yüksek hacim, şimdi düşük → tuzak
+            vol_ma = df['volume_ma'].iloc[index] if 'volume_ma' in df.columns else np.mean(volumes)
+            if not pd.isna(vol_ma) and vol_ma > 0:
+                prev_vol_ratio = volumes[-2] / vol_ma if len(volumes) >= 2 else 0
+                curr_vol_ratio = volumes[-1] / vol_ma
+
+                if prev_vol_ratio > 2.0 and curr_vol_ratio < 1.0:
+                    result['is_trap_risk'] = True
+                    if not result['description']:
+                        result['description'] = "⚠️ Hacim spike sonrası düşüş — tuzak olasılığı"
+
+        except Exception:
+            pass
+
+        return result
+
+    @staticmethod
     def get_summary(df, index=-1):
         """Tüm göstergelerin özetini verir."""
         if df.empty or len(df) < EMA_LONG:
@@ -273,6 +356,10 @@ class TechnicalIndicators:
         close   = df['close'].iloc[index]
         if pd.isna(rsi_val) or pd.isna(close):
             return None
+
+        # Hacim trend analizi
+        vol_trend = TechnicalIndicators.get_volume_trend(df, index)
+
         return {
             'price':            close,
             'rsi':              rsi_val,
@@ -283,6 +370,11 @@ class TechnicalIndicators:
             'ema_alignment':    TechnicalIndicators.get_ema_alignment(df, index),
             'adx_signal':       TechnicalIndicators.get_adx_signal(df, index),
             'volume_signal':    TechnicalIndicators.get_volume_signal(df, index),
+            # Hacim trend analizi (YENİ)
+            'volume_trend':     vol_trend.get('volume_trend', 'flat'),
+            'volume_price_divergence': vol_trend.get('volume_price_divergence', False),
+            'is_trap_risk':     vol_trend.get('is_trap_risk', False),
+            'volume_trap_desc': vol_trend.get('description', ''),
             # Ham değerler
             'ema_fast':         df['ema_fast'].iloc[index],
             'ema_mid':          df['ema_mid'].iloc[index],

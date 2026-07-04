@@ -31,6 +31,8 @@ from backtest.engine import BacktestEngine
 from backtest.hyperopt import HyperOptimizer
 from notifications.notifier import TelegramNotifier
 
+import threading
+
 
 def setup_logging():
     """Loglama ayarlarını yapılandırır."""
@@ -114,6 +116,187 @@ def run_backtest(symbol=None, start_date=None, end_date=None,
     return all_results
 
 
+def generate_daily_report(collector, storage, state_manager, notifier, risk_managers, symbols):
+    """
+    Günlük rapor oluşturur ve Telegram'a gönderir.
+    Son 24 saatteki işlemler, komisyon çıkılmış net kâr, açık pozisyonlar.
+    """
+    logger = logging.getLogger('daily_report')
+    logger.info("📊 Günlük rapor oluşturuluyor...")
+
+    try:
+        from datetime import timedelta
+        import sqlite3
+        from config.settings import DB_PATH, BACKTEST_INITIAL_BALANCE
+
+        now = datetime.now()
+        yesterday = now - timedelta(hours=24)
+        yesterday_str = yesterday.strftime('%Y-%m-%d %H:%M:%S')
+
+        # 1. Son 24 saatteki işlemleri DB'den çek
+        trades_today = []
+        total_gross_pnl = 0
+        total_fees = 0
+        win_count_today = 0
+        loss_count_today = 0
+
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM trades WHERE timestamp >= ? AND mode='live' ORDER BY timestamp",
+                (yesterday_str,)
+            )
+            rows = cursor.fetchall()
+            # Column names: id, timestamp, symbol, side, price, amount, cost, fee, profit_loss, strategy, signal_reason, mode
+            for row in rows:
+                trade = {
+                    'timestamp': row[1],
+                    'symbol': row[2],
+                    'side': row[3],
+                    'price': row[4],
+                    'amount': row[5],
+                    'cost': row[6],
+                    'fee': row[7],
+                    'net_pnl': row[8],  # profit_loss
+                }
+                trades_today.append(trade)
+                if row[3] == 'sell':
+                    total_fees += row[7]
+                    # Brüt PnL hesapla (basit)
+                    total_gross_pnl += row[8] + row[7]  # net + fee = gross
+                    if row[8] > 0:
+                        win_count_today += 1
+                    elif row[8] < 0:
+                        loss_count_today += 1
+
+            # Tüm zamanlar istatistikleri
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE mode='live'")
+            total_trades_alltime = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE mode='live' AND side='sell' AND profit_loss > 0")
+            win_count_all = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE mode='live' AND side='sell' AND profit_loss <= 0")
+            loss_count_all = cursor.fetchone()[0]
+
+            conn.close()
+        except Exception as e:
+            logger.error(f"DB okuma hatası: {e}")
+            total_trades_alltime = 0
+            win_count_all = 0
+            loss_count_all = 0
+
+        total_net_pnl = total_gross_pnl - total_fees
+
+        # 2. Bakiye
+        try:
+            balance_info = collector.fetch_balance()
+            usdt_balance = balance_info.get('USDT', {}).get('free', 0)
+        except Exception:
+            usdt_balance = 0
+
+        # 3. Açık pozisyonlar
+        open_positions = []
+        total_unrealized = 0
+        for sym in symbols:
+            rm = risk_managers.get(sym)
+            if rm and rm.active_position:
+                pos = rm.active_position
+                try:
+                    ticker = collector.fetch_ticker(sym)
+                    current = ticker['last']
+                except Exception:
+                    current = pos['entry_price']
+
+                pnl_usd = (current - pos['entry_price']) * pos['amount']
+                pnl_pct = (current - pos['entry_price']) / pos['entry_price'] * 100 if pos['entry_price'] else 0
+                total_unrealized += pnl_usd
+
+                open_positions.append({
+                    'symbol': sym,
+                    'entry_price': pos['entry_price'],
+                    'current_price': current,
+                    'amount': pos['amount'],
+                    'pnl_usd': pnl_usd,
+                    'pnl_pct': pnl_pct,
+                })
+
+        # 4. BTC fiyatı
+        try:
+            btc_ticker = collector.fetch_ticker('BTC/USDT')
+            btc_price = btc_ticker['last']
+        except Exception:
+            btc_price = 0
+
+        # 5. Toplam getiri
+        initial_bal = BACKTEST_INITIAL_BALANCE  # İlk yatırılan miktar
+        net_portfolio = usdt_balance + total_unrealized
+        total_return = ((net_portfolio - initial_bal) / initial_bal * 100) if initial_bal > 0 else 0
+
+        # Rapor gönder
+        report_data = {
+            'balance': usdt_balance,
+            'initial_balance': initial_bal,
+            'btc_price': btc_price,
+            'trades_today': trades_today,
+            'total_gross_pnl': total_gross_pnl,
+            'total_fees': total_fees,
+            'total_net_pnl': total_net_pnl,
+            'open_positions': open_positions,
+            'unrealized_pnl': total_unrealized,
+            'total_return': total_return,
+            'total_trades_alltime': total_trades_alltime,
+            'win_count': win_count_all,
+            'loss_count': loss_count_all,
+        }
+
+        notifier.send_daily_report(report_data)
+        logger.info("✅ Günlük rapor Telegram'a gönderildi")
+
+    except Exception as e:
+        logger.error(f"❌ Günlük rapor oluşturma hatası: {e}", exc_info=True)
+        notifier.send_error(f"Günlük rapor hatası: {e}")
+
+
+def start_daily_report_scheduler(collector, storage, state_manager, notifier, risk_managers, symbols):
+    """
+    Her gün saat 12:00'de (Europe/Istanbul) günlük rapor gönderen
+    arka plan thread'i başlatır.
+    """
+    logger = logging.getLogger('daily_scheduler')
+
+    def _scheduler_loop():
+        while True:
+            try:
+                now = datetime.now()
+                # Bugün saat 12:00
+                target = now.replace(hour=12, minute=0, second=0, microsecond=0)
+                if now >= target:
+                    # Bugünkü 12:00 geçtiyse yarının 12:00'sine hedefle
+                    from datetime import timedelta
+                    target = target + timedelta(days=1)
+
+                wait_seconds = (target - now).total_seconds()
+                logger.info(f"⏰ Günlük rapor zamanlanıyor: {target.strftime('%Y-%m-%d %H:%M')} "
+                           f"({wait_seconds/3600:.1f} saat sonra)")
+
+                time.sleep(wait_seconds)
+
+                # Rapor zamanı geldi!
+                generate_daily_report(
+                    collector, storage, state_manager, notifier,
+                    risk_managers, symbols
+                )
+
+            except Exception as e:
+                logger.error(f"❌ Günlük zamanlayıcı hatası: {e}")
+                time.sleep(3600)  # Hata olursa 1 saat bekle
+
+    thread = threading.Thread(target=_scheduler_loop, daemon=True, name="DailyReport")
+    thread.start()
+    logger.info("✅ Günlük rapor zamanlayıcısı başlatıldı (her gün 12:00)")
+
+
 def run_live_bot():
     """
     Canlı (veya paper) trading bot çalıştırır.
@@ -177,6 +360,12 @@ def run_live_bot():
     logger.info(f"⏰ Bot çalışıyor - {len(symbols)} coin taranıyor")
     logger.info(f"📋 Coinler: {coin_list}")
     logger.info(f"🔧 Closed candle mode: {CLOSED_CANDLE_MODE}")
+
+    # Günlük rapor zamanlayıcısını başlat (her gün 12:00)
+    start_daily_report_scheduler(
+        collector, storage, state_manager, notifier,
+        risk_managers, symbols
+    )
 
     scan_count = 0
 

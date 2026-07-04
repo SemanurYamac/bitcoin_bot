@@ -362,6 +362,18 @@ class DonchianLiveBot:
         self.tg.send(msg)
         logger.info('Günlük rapor gönderildi')
 
+    def _dust_sweep(self):
+        """Haftalık: $5 altı kırıntıları BNB'ye çevir (komisyon deposunu doldurur)."""
+        info = self.exchange.sapiPostAssetDustBtc()
+        assets = [d['asset'] for d in info.get('details', []) if d['asset'] != 'BNB']
+        if not assets:
+            return
+        result = self.exchange.sapiPostAssetDust({'asset': assets})
+        total = result.get('totalTransfered', '?')
+        msg = f'🧹 Dust süpürüldü: {", ".join(assets)} → {total} BNB'
+        logger.info(msg)
+        self.tg.send(msg)
+
     def run(self):
         mode = 'CANLI 🔴' if self.live else 'DRY-RUN'
         self.tg.send(f'🐢 Donchian Weekly bot başladı ({mode}) — '
@@ -382,6 +394,12 @@ class DonchianLiveBot:
                     self._save_state()
                 except Exception as e:
                     logger.error(f'Günlük rapor hatası: {e}')
+                # Pazartesi geceleri kırıntı süpürme (canlı modda)
+                if self.live and datetime.now(TR_TZ).weekday() == 0:
+                    try:
+                        self._dust_sweep()
+                    except Exception as e:
+                        logger.warning(f'Dust sweep başarısız: {e}')
 
             # Bir sonraki tam saate hizalan → gece yarısı taraması tam 00:00'da olur
             time.sleep(CHECK_INTERVAL - time.time() % CHECK_INTERVAL)

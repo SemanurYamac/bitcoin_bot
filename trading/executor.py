@@ -330,8 +330,90 @@ class TradeExecutor:
             return result
 
         except Exception as e:
+            error_str = str(e).lower()
+            # ─── Yetersiz Bakiye: Gerçek bakiyeyle retry ──────────────────
+            if 'insufficient balance' in error_str or 'insufficient funds' in error_str:
+                logger.warning(
+                    f"⚠️ [{symbol}] Yetersiz bakiye hatası — Binance'teki gerçek "
+                    f"bakiye kontrol ediliyor (phantom pozisyon tespiti)..."
+                )
+                try:
+                    base_coin = symbol.split('/')[0]  # 'LINK/USDT' → 'LINK'
+                    balance_info = self.collector.exchange.fetch_balance()
+                    actual_balance = float(balance_info.get('free', {}).get(base_coin, 0))
+                    logger.info(f"📊 [{symbol}] Gerçek {base_coin} bakiyesi: {actual_balance:.8f}")
+
+                    # Bakiye ihmal edilebilir düzeyde → phantom pozisyon
+                    min_threshold = 0.001 * amount  # State'deki miktarın %0.1'i
+                    if actual_balance < min_threshold:
+                        logger.warning(
+                            f"🔍 [{symbol}] Phantom pozisyon tespit edildi! "
+                            f"State={amount:.8f}, Gerçek bakiye={actual_balance:.8f} "
+                            f"(dust seviyesi). Pozisyon otomatik kapatılıyor."
+                        )
+                        # Pozisyon yöneticisine "dust satış" olarak bildir
+                        return {
+                            'id': f"phantom_close_{datetime.now().timestamp()}",
+                            'symbol': symbol,
+                            'side': 'sell',
+                            'price': price or 0,
+                            'amount': actual_balance,
+                            'cost': (price or 0) * actual_balance,
+                            'fee': 0,
+                            'timestamp': datetime.now(),
+                            'status': 'phantom_closed',
+                            'mode': self.mode,
+                            'phantom': True,
+                        }
+
+                    # Yeterli bakiye var → gerçek bakiyeyle yeniden dene
+                    logger.info(
+                        f"🔄 [{symbol}] Gerçek bakiyeyle yeniden satış deneniyor: "
+                        f"{actual_balance:.8f} {base_coin}"
+                    )
+                    # Notional check için güncel fiyat gerekli (market order'da price=None)
+                    retry_price = price
+                    if retry_price is None or retry_price <= 0:
+                        try:
+                            ticker = self.collector.public_exchange.fetch_ticker(symbol)
+                            retry_price = ticker['last']
+                        except Exception as tick_err:
+                            logger.warning(
+                                f"⚠️ [{symbol}] Retry için ticker alınamadı: {tick_err}"
+                            )
+                            retry_price = 0
+                    adjusted_actual = self._prepare_quantity(symbol, actual_balance, retry_price)
+                    if adjusted_actual > 0:
+                        if price:
+                            order = self.collector.exchange.create_limit_sell_order(
+                                symbol, adjusted_actual, price
+                            )
+                        else:
+                            order = self.collector.exchange.create_market_sell_order(
+                                symbol, adjusted_actual
+                            )
+                        logger.info(f"✅ [{symbol}] Gerçek bakiyeyle satış başarılı: {adjusted_actual:.8f}")
+                        filled_amount = order.get('filled') or adjusted_actual
+                        actual_price = order.get('average') or order.get('price') or price
+                        return {
+                            'id': order.get('id', ''),
+                            'symbol': symbol,
+                            'side': 'sell',
+                            'price': actual_price,
+                            'amount': filled_amount,
+                            'cost': order.get('cost', filled_amount * (actual_price or 0)),
+                            'fee': order.get('fee', {}).get('cost', 0) if isinstance(order.get('fee'), dict) else 0,
+                            'timestamp': datetime.now(),
+                            'status': order.get('status', 'filled'),
+                            'mode': self.mode,
+                            'balance_corrected': True,
+                        }
+                except Exception as retry_err:
+                    logger.error(f"❌ [{symbol}] Gerçek bakiye kontrolü de başarısız: {retry_err}")
+
             logger.error(f"❌ Satım emri hatası [{symbol}]: {e}")
             raise
+
 
     def get_open_orders(self, symbol=None):
         """Açık emirleri listeler."""

@@ -342,18 +342,23 @@ class DonchianLiveBot:
                 price = pos['entry']
             val = pos['amount'] * price
             pos_value += val
+            pnl_usd = val - pos['cost']
             pnl_pct = (price / pos['entry'] - 1) * 100
-            pos_lines.append(f'• {sym}: ${val:.2f} ({pnl_pct:+.1f}%) | stop {pos["stop"]:.6f}')
+            pos_lines.append(
+                f'• {sym}: giriş {pos["entry"]:.6f} → şimdi {price:.6f}\n'
+                f'  ${val:.2f} ({pnl_usd:+.2f}$ / {pnl_pct:+.1f}%) | stop {pos["stop"]:.6f}'
+            )
 
         equity = free_usdt + pos_value
         baseline = self.state.setdefault('baseline_equity', equity)
+        total_usd = equity - baseline
         total_pct = (equity / baseline - 1) * 100 if baseline else 0.0
         closed = self.state['closed_trades']
         realized = sum(t['pnl'] for t in closed)
 
         msg = (f'📊 Donchian günlük rapor — {datetime.now(TR_TZ).strftime("%d.%m.%Y %H:%M")}\n'
                f'━━━━━━━━━━━━━━━\n'
-               f'💰 Toplam değer: ${equity:.2f} ({total_pct:+.2f}% başlangıçtan)\n'
+               f'💰 Toplam değer: ${equity:.2f} ({total_usd:+.2f}$ / {total_pct:+.2f}% başlangıçtan)\n'
                f'💵 Serbest USDT: ${free_usdt:.2f}\n'
                f'🌗 Rejim: {self.state.get("regime", "?")}\n'
                f'📈 Açık pozisyon: {len(self.state["positions"])}\n'
@@ -363,9 +368,19 @@ class DonchianLiveBot:
         logger.info('Günlük rapor gönderildi')
 
     def _dust_sweep(self):
-        """Haftalık: $5 altı kırıntıları BNB'ye çevir (komisyon deposunu doldurur)."""
+        """Haftalık: $5 altı kırıntıları BNB'ye çevir (komisyon deposunu doldurur).
+
+        Binance'in "çevrilebilir" listesi $30+ bakiyeleri de içerebiliyor;
+        açık pozisyon coinleri ve $5 üstü bakiyeler asla süpürülmez
+        (2026-07-13'te PROM+UNI pozisyonları yanlışlıkla süpürüldü).
+        """
+        held = {sym.split('/')[0] for sym in self.state['positions']}
+        btc_usdt = self._ticker_price('BTC/USDT')
         info = self.exchange.sapiPostAssetDustBtc()
-        assets = [d['asset'] for d in info.get('details', []) if d['asset'] != 'BNB']
+        assets = [d['asset'] for d in info.get('details', [])
+                  if d['asset'] != 'BNB'
+                  and d['asset'] not in held
+                  and float(d.get('toBTC', 0)) * btc_usdt < 5.0]
         if not assets:
             return
         result = self.exchange.sapiPostAssetDust({'asset': assets})

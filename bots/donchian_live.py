@@ -50,7 +50,7 @@ CHECK_INTERVAL = 3600   # saniye — haftalık sistem için saatlik tarama fazla
 REGIME_EMA = 40
 SIZING = {
     'bear': {'pct': 0.10, 'max_pos': 5},
-    'bull': {'pct': 0.18, 'max_pos': 6},
+    'bull': {'pct': 0.25, 'max_pos': 8},  # 2026-07-27: sizing süpürmesi → tam döngüde en iyi (+176% vs +138%)
 }
 
 
@@ -393,7 +393,7 @@ class DonchianLiveBot:
         mode = 'CANLI 🔴' if self.live else 'DRY-RUN'
         self.tg.send(f'🐢 Donchian Weekly bot başladı ({mode}) — '
                      f'{len(self.universe)} coin, rejim-bazlı sizing '
-                     f'(ayı %10/5, boğa %18/6)')
+                     f'(ayı %10/5, boğa %25/8)')
         while True:
             try:
                 self.scan_once()
